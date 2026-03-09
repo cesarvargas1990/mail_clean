@@ -1,0 +1,19 @@
+# Credenciales y tokens sensibles
+credentials.json
+*token*.json
+
+# Variables de entorno y secretos
+.env
+.env.*
+*.pem
+*.key
+*.p12
+
+# Caché/artefactos Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Archivos del sistema
+.DS_Store
