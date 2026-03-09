@@ -8,16 +8,27 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 PROCESSES = 12
+TOKEN_GMAIL_DEFAULT = "token_gmail.json"
+CURRENT_USER_ID = "me"
+CURRENT_TOKEN_FILE = TOKEN_GMAIL_DEFAULT
 
 
-def get_service():
+def _safe_token_file(user_email):
+    user_email = (user_email or "").strip().lower()
+    if not user_email or user_email == "me":
+        return TOKEN_GMAIL_DEFAULT
+    clean = "".join(c if c.isalnum() else "_" for c in user_email)
+    return f"token_gmail_{clean}.json"
+
+
+def get_service(token_file=TOKEN_GMAIL_DEFAULT):
     """Crea un cliente Gmail API aislado por proceso."""
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
+    if os.path.exists(token_file):
+        creds = Credentials.from_authorized_user_file(token_file, SCOPES)
     else:
         flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
         creds = flow.run_local_server(port=0)
-        with open("token.json", "w") as f:
+        with open(token_file, "w") as f:
             f.write(creds.to_json())
 
     return build("gmail", "v1", credentials=creds)
@@ -36,14 +47,14 @@ def extract_domain(email):
 
 def process_chunk(ids_chunk):
     """Procesa un grupo de mensajes en un proceso independiente."""
-    service = get_service()
+    service = get_service(CURRENT_TOKEN_FILE)
     from_local = defaultdict(int)
     to_local = defaultdict(int)
 
     for msg_id in ids_chunk:
         try:
             msg = service.users().messages().get(
-                userId="me",
+                userId=CURRENT_USER_ID,
                 id=msg_id,
                 format="metadata",
                 metadataHeaders=["From", "To"]
@@ -60,7 +71,7 @@ def process_chunk(ids_chunk):
                 elif name == "To":
                     to_local[value] += 1
 
-        except:
+        except Exception:
             pass
 
     return dict(from_local), dict(to_local)
@@ -71,17 +82,27 @@ def merge_dicts(a, b):
         a[k] = a.get(k, 0) + v
 
 
-def process():
-    print("🔐 Autenticando...")
-    service = get_service()
+def init_worker(user_id, token_file):
+    global CURRENT_USER_ID, CURRENT_TOKEN_FILE
+    CURRENT_USER_ID = user_id
+    CURRENT_TOKEN_FILE = token_file
 
-    print("🔍 Obteniendo lista de IDs...")
+
+def process(user_email=None, processes=PROCESSES, log=print):
+    user_id = (user_email or "").strip() or "me"
+    token_file = _safe_token_file(user_id)
+    logger = log if callable(log) else print
+
+    logger("🔐 Autenticando...")
+    service = get_service(token_file)
+
+    logger("🔍 Obteniendo lista de IDs...")
     ids = []
     page = None
 
     while True:
         resp = service.users().messages().list(
-            userId="me",
+            userId=user_id,
             pageToken=page,
             maxResults=500
         ).execute()
@@ -93,16 +114,19 @@ def process():
         else:
             break
 
-    print(f"📬 Total mensajes: {len(ids)}")
+    logger(f"📬 Total mensajes: {len(ids)}")
 
     # dividir en chunks
-    chunk_size = len(ids) // PROCESSES + 1
+    chunk_size = len(ids) // processes + 1
     chunks = [ids[i:i + chunk_size] for i in range(0, len(ids), chunk_size)]
 
-    print(f"⚡ Procesando en paralelo con {PROCESSES} procesos...")
+    logger(f"⚡ Procesando en paralelo con {processes} procesos...")
 
-    with mp.Pool(PROCESSES) as pool:
-        results = pool.map(process_chunk, chunks)
+    if chunks:
+        with mp.Pool(processes, initializer=init_worker, initargs=(user_id, token_file)) as pool:
+            results = pool.map(process_chunk, chunks)
+    else:
+        results = []
 
     from_counter = {}
     to_counter = {}
@@ -123,7 +147,7 @@ def process():
         for rec, count in sorted(to_counter.items(), key=lambda x: x[1], reverse=True):
             f.write(f"{count} → {rec}\n")
 
-    print("📄 Archivo generado: detalle_correos.txt")
+    logger("📄 Archivo generado: detalle_correos.txt")
 
     # -------------------------------------------
     # 📁 ARCHIVO 2: dominios agrupados
@@ -145,9 +169,10 @@ def process():
         for dom, count in sorted(domain_map.items(), key=lambda x: x[1], reverse=True):
             f.write(f"{count} → {dom}\n")
 
-    print("📄 Archivo generado: dominios.txt")
+    logger("📄 Archivo generado: dominios.txt")
 
-    print("\n✅ PROCESAMIENTO COMPLETO\n")
+    logger("\n✅ PROCESAMIENTO COMPLETO\n")
+    return ["detalle_correos.txt", "dominios.txt"]
 
 
 if __name__ == "__main__":
