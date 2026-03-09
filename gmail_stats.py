@@ -9,6 +9,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 PROCESSES = 12
 TOKEN_GMAIL_DEFAULT = "token_gmail.json"
+DETAIL_REPORT_FILE = "detalle_correos.txt"
+DOMAIN_REPORT_FILE = "dominios.txt"
 CURRENT_USER_ID = "me"
 CURRENT_TOKEN_FILE = TOKEN_GMAIL_DEFAULT
 
@@ -88,18 +90,9 @@ def init_worker(user_id, token_file):
     CURRENT_TOKEN_FILE = token_file
 
 
-def process(user_email=None, processes=PROCESSES, log=print):
-    user_id = (user_email or "").strip() or "me"
-    token_file = _safe_token_file(user_id)
-    logger = log if callable(log) else print
-
-    logger("🔐 Autenticando...")
-    service = get_service(token_file)
-
-    logger("🔍 Obteniendo lista de IDs...")
+def list_message_ids(service, user_id):
     ids = []
     page = None
-
     while True:
         resp = service.users().messages().list(
             userId=user_id,
@@ -113,6 +106,41 @@ def process(user_email=None, processes=PROCESSES, log=print):
             page = resp["nextPageToken"]
         else:
             break
+    return ids
+
+
+def write_domain_report(from_counter, to_counter, path=DOMAIN_REPORT_FILE):
+    domain_from_map = defaultdict(int)
+    domain_to_map = defaultdict(int)
+
+    for sender, count in from_counter.items():
+        domain = extract_domain(sender)
+        domain_from_map[domain] += count
+
+    for rec, count in to_counter.items():
+        domain = extract_domain(rec)
+        domain_to_map[domain] += count
+
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("===== DOMINIOS REMITENTES (RECIBIDOS) =====\n")
+        for dom, count in sorted(domain_from_map.items(), key=lambda x: x[1], reverse=True):
+            f.write(f"{count} → {dom}\n")
+
+        f.write("\n\n===== DOMINIOS DESTINATARIOS (ENVIADOS) =====\n")
+        for dom, count in sorted(domain_to_map.items(), key=lambda x: x[1], reverse=True):
+            f.write(f"{count} → {dom}\n")
+
+
+def process(user_email=None, processes=PROCESSES, log=print):
+    user_id = (user_email or "").strip() or "me"
+    token_file = _safe_token_file(user_id)
+    logger = log if callable(log) else print
+
+    logger("🔐 Autenticando...")
+    service = get_service(token_file)
+
+    logger("🔍 Obteniendo lista de IDs...")
+    ids = list_message_ids(service, user_id)
 
     logger(f"📬 Total mensajes: {len(ids)}")
 
@@ -138,7 +166,7 @@ def process(user_email=None, processes=PROCESSES, log=print):
     # -------------------------------------------
     # 📁 ARCHIVO 1: detalle completo
     # -------------------------------------------
-    with open("detalle_correos.txt", "w", encoding="utf-8") as f:
+    with open(DETAIL_REPORT_FILE, "w", encoding="utf-8") as f:
         f.write("===== REMITENTES =====\n")
         for sender, count in sorted(from_counter.items(), key=lambda x: x[1], reverse=True):
             f.write(f"{count} → {sender}\n")
@@ -147,32 +175,17 @@ def process(user_email=None, processes=PROCESSES, log=print):
         for rec, count in sorted(to_counter.items(), key=lambda x: x[1], reverse=True):
             f.write(f"{count} → {rec}\n")
 
-    logger("📄 Archivo generado: detalle_correos.txt")
+    logger(f"📄 Archivo generado: {DETAIL_REPORT_FILE}")
 
     # -------------------------------------------
-    # 📁 ARCHIVO 2: dominios agrupados
+    # 📁 ARCHIVO 2: dominios por recibidos/enviados
     # -------------------------------------------
-    domain_map = defaultdict(int)
+    write_domain_report(from_counter, to_counter, DOMAIN_REPORT_FILE)
 
-    # agregar dominios de remitentes
-    for sender, count in from_counter.items():
-        domain = extract_domain(sender)
-        domain_map[domain] += count
-
-    # agregar dominios de destinatarios
-    for rec, count in to_counter.items():
-        domain = extract_domain(rec)
-        domain_map[domain] += count
-
-    with open("dominios.txt", "w", encoding="utf-8") as f:
-        f.write("===== DOMINIOS AGRUPADOS =====\n")
-        for dom, count in sorted(domain_map.items(), key=lambda x: x[1], reverse=True):
-            f.write(f"{count} → {dom}\n")
-
-    logger("📄 Archivo generado: dominios.txt")
+    logger(f"📄 Archivo generado: {DOMAIN_REPORT_FILE}")
 
     logger("\n✅ PROCESAMIENTO COMPLETO\n")
-    return ["detalle_correos.txt", "dominios.txt"]
+    return [DETAIL_REPORT_FILE, DOMAIN_REPORT_FILE]
 
 
 if __name__ == "__main__":

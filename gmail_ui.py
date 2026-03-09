@@ -70,23 +70,81 @@ class GmailReportApp:
         for tab_id in self.notebook.tabs():
             self.notebook.forget(tab_id)
 
+    @staticmethod
+    def extract_sections(content, header_a, header_b):
+        idx_a = content.find(header_a)
+        idx_b = content.find(header_b)
+        if idx_a == -1 or idx_b == -1:
+            return None, None
+
+        if idx_a < idx_b:
+            section_a = content[idx_a + len(header_a):idx_b].strip()
+            section_b = content[idx_b + len(header_b):].strip()
+        else:
+            section_b = content[idx_b + len(header_b):idx_a].strip()
+            section_a = content[idx_a + len(header_a):].strip()
+
+        return section_a, section_b
+
+    def add_text_tab(self, parent_notebook, title, text):
+        frame = ttk.Frame(parent_notebook)
+        parent_notebook.add(frame, text=title)
+        content = ScrolledText(frame, wrap="none")
+        content.pack(fill="both", expand=True)
+        content.insert("1.0", text)
+        content.configure(state="disabled")
+
     def build_tabs(self, files):
         self.clear_tabs()
-        for path in files:
-            if not os.path.exists(path):
-                self.append_log(f"⚠️ No se encontró el archivo esperado: {path}")
-                continue
 
-            tab = ttk.Frame(self.notebook)
-            self.notebook.add(tab, text=os.path.basename(path))
+        detalle_path = "detalle_correos.txt"
+        dominios_path = "dominios.txt"
 
-            content = ScrolledText(tab, wrap="none")
-            content.pack(fill="both", expand=True)
+        if detalle_path in files and os.path.exists(detalle_path):
+            with open(detalle_path, "r", encoding="utf-8") as f:
+                detalle_content = f.read()
 
-            with open(path, "r", encoding="utf-8") as f:
-                content.insert("1.0", f.read())
+            detalle_tab = ttk.Frame(self.notebook)
+            self.notebook.add(detalle_tab, text="Detalle correos")
+            detalle_notebook = ttk.Notebook(detalle_tab)
+            detalle_notebook.pack(fill="both", expand=True)
 
-            content.configure(state="disabled")
+            recibidos, enviados = self.extract_sections(
+                detalle_content,
+                "===== REMITENTES =====",
+                "===== DESTINATARIOS =====",
+            )
+
+            if recibidos is not None and enviados is not None:
+                self.add_text_tab(detalle_notebook, "Recibidos", recibidos)
+                self.add_text_tab(detalle_notebook, "Enviados", enviados)
+            else:
+                self.add_text_tab(detalle_notebook, "Completo", detalle_content)
+        else:
+            self.append_log(f"⚠️ No se encontró el archivo esperado: {detalle_path}")
+
+        if dominios_path in files and os.path.exists(dominios_path):
+            with open(dominios_path, "r", encoding="utf-8") as f:
+                dominios_content = f.read()
+
+            dominios_tab = ttk.Frame(self.notebook)
+            self.notebook.add(dominios_tab, text="Dominios")
+            dominios_notebook = ttk.Notebook(dominios_tab)
+            dominios_notebook.pack(fill="both", expand=True)
+
+            recibidos_dom, enviados_dom = self.extract_sections(
+                dominios_content,
+                "===== DOMINIOS REMITENTES (RECIBIDOS) =====",
+                "===== DOMINIOS DESTINATARIOS (ENVIADOS) =====",
+            )
+
+            if recibidos_dom is not None and enviados_dom is not None:
+                self.add_text_tab(dominios_notebook, "Recibidos", recibidos_dom)
+                self.add_text_tab(dominios_notebook, "Enviados", enviados_dom)
+            else:
+                self.add_text_tab(dominios_notebook, "Completo", dominios_content)
+        else:
+            self.append_log(f"⚠️ No se encontró el archivo esperado: {dominios_path}")
 
     def start_report(self):
         email = self.email_var.get().strip()
