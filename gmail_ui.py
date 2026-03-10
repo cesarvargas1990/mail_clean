@@ -2,6 +2,7 @@ import os
 import io
 import queue
 import threading
+import csv
 import re
 import webbrowser
 from contextlib import redirect_stdout
@@ -19,6 +20,9 @@ from onedrive_stats import list_onedrive
 class GmailReportApp:
     VERTICAL_NOTEBOOK_STYLE = "Vertical.TNotebook"
     REQUIRED_EMAIL_TITLE = "Correo requerido"
+    EVT_CLICK = "<Button-1>"
+    EVT_ENTER = "<Enter>"
+    EVT_LEAVE = "<Leave>"
     URL_PATTERN = re.compile(r"https?://[^\s;]+")
     DRIVE_LIST_FILE = "drive_archivos.csv"
     DRIVE_SUMMARY_FILE = "resumen_extensiones.txt"
@@ -245,6 +249,151 @@ class GmailReportApp:
         self.enable_clickable_links(content, text)
         content.configure(state="disabled")
 
+    @staticmethod
+    def prepare_csv_rows(columns, data_rows):
+        display_rows = []
+        original_map = {}
+
+        for idx, row in enumerate(data_rows):
+            normalized = (row + [""] * (len(columns) - len(row)))[:len(columns)]
+            row_map = dict(zip(columns, normalized))
+
+            display_map = dict(row_map)
+            if "view_url" in display_map:
+                display_map["view_url"] = "🔗 Abrir"
+            if "download_url" in display_map:
+                display_map["download_url"] = "⬇ Descargar"
+
+            display_rows.append([display_map.get(col, "") for col in columns])
+            original_map[idx] = row_map
+
+        return display_rows, original_map
+
+    @staticmethod
+    def get_column_weights(columns):
+        weights = {}
+        for col in columns:
+            if col == "full_path":
+                weights[col] = 4
+            elif col in ("view_url", "download_url"):
+                weights[col] = 2
+            else:
+                weights[col] = 1
+        return weights
+
+    @staticmethod
+    def clear_link_widget(label_widget):
+        label_widget.config(text="", cursor="arrow", font=("TkDefaultFont", 10))
+
+    def set_link_widget(self, label_widget, text, url):
+        if not url:
+            self.clear_link_widget(label_widget)
+            label_widget.unbind(self.EVT_CLICK)
+            label_widget.unbind(self.EVT_ENTER)
+            label_widget.unbind(self.EVT_LEAVE)
+            return
+
+        label_widget.config(text=text, cursor="hand2", font=("TkDefaultFont", 10, "underline"), fg="#1a73e8")
+        label_widget.bind(self.EVT_CLICK, lambda _e, link=url: webbrowser.open(link))
+        label_widget.bind(self.EVT_ENTER, lambda _e: label_widget.config(fg="#0b57d0"))
+        label_widget.bind(self.EVT_LEAVE, lambda _e: label_widget.config(fg="#1a73e8"))
+
+    @staticmethod
+    def fit_tree_columns(tree, frame, columns, column_weights):
+        total_width = max(tree.winfo_width(), frame.winfo_width()) - 24
+        if total_width <= 0:
+            return
+        total_weight = sum(column_weights.values())
+        for col in columns:
+            proportion = column_weights[col] / total_weight
+            width = max(90, int(total_width * proportion))
+            tree.column(col, width=width)
+
+    def build_link_frame(self, frame):
+        link_frame = ttk.Frame(frame)
+        link_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        link_frame.grid_columnconfigure(0, weight=1)
+        link_frame.grid_columnconfigure(1, weight=1)
+
+        view_link = tk.Label(link_frame, text="", fg="#1a73e8", cursor="arrow", anchor="w")
+        download_link = tk.Label(link_frame, text="", fg="#1a73e8", cursor="arrow", anchor="w")
+        view_link.grid(row=0, column=0, sticky="w")
+        download_link.grid(row=0, column=1, sticky="w")
+        return view_link, download_link
+
+    def add_csv_grid_tab(self, parent_notebook, title, csv_path):
+        frame = ttk.Frame(parent_notebook)
+        parent_notebook.add(frame, text=title)
+
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.reader(f, delimiter=";")
+            rows = list(reader)
+
+        if not rows:
+            self.add_text_tab(parent_notebook, f"{title}-vacío", "Sin datos")
+            return
+
+        columns = rows[0]
+        data_rows = rows[1:]
+        display_rows, original_map_by_index = self.prepare_csv_rows(columns, data_rows)
+        column_weights = self.get_column_weights(columns)
+
+        tree = ttk.Treeview(frame, columns=columns, show="headings")
+        y_scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        x_scroll = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+
+        for col in columns:
+            tree.heading(col, text=col)
+            tree.column(col, width=120, anchor="w", stretch=False)
+
+        for row in display_rows:
+            tree.insert("", "end", values=row)
+
+        tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+
+        view_link, download_link = self.build_link_frame(frame)
+
+        frame.grid_rowconfigure(0, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
+
+        original_rows_map = {}
+        for idx, item_id in enumerate(tree.get_children()):
+            original_rows_map[item_id] = original_map_by_index.get(idx, {})
+
+        def fit_columns(_event=None):
+            self.fit_tree_columns(tree, frame, columns, column_weights)
+
+        def clear_link_labels():
+            self.set_link_widget(view_link, "", "")
+            self.set_link_widget(download_link, "", "")
+
+        def on_select(_event=None):
+            selected = tree.selection()
+            if not selected:
+                clear_link_labels()
+                return
+            row_data = original_rows_map.get(selected[0], {})
+            self.set_link_widget(view_link, "🔗 Abrir enlace", row_data.get("view_url", ""))
+            self.set_link_widget(download_link, "⬇ Descargar archivo", row_data.get("download_url", ""))
+
+        def open_selected_link(_event=None):
+            selected = tree.selection()
+            if not selected:
+                return
+            row_data = original_rows_map.get(selected[0], {})
+            url = row_data.get("view_url") or row_data.get("download_url")
+            if url and url.startswith("http"):
+                webbrowser.open(url)
+
+        tree.bind("<<TreeviewSelect>>", on_select)
+        tree.bind("<Double-1>", open_selected_link)
+        tree.bind("<Configure>", fit_columns)
+        frame.bind("<Configure>", fit_columns)
+        fit_columns()
+
     def enable_clickable_links(self, text_widget, full_text):
         for idx, match in enumerate(self.URL_PATTERN.finditer(full_text)):
             start = match.start()
@@ -256,7 +405,9 @@ class GmailReportApp:
 
             text_widget.tag_add(tag, start_index, end_index)
             text_widget.tag_config(tag, foreground="#1a73e8", underline=True)
-            text_widget.tag_bind(tag, "<Button-1>", lambda _e, link=url: webbrowser.open(link))
+            text_widget.tag_bind(tag, self.EVT_CLICK, lambda _e, link=url: webbrowser.open(link))
+            text_widget.tag_bind(tag, self.EVT_ENTER, lambda _e: text_widget.configure(cursor="hand2"))
+            text_widget.tag_bind(tag, self.EVT_LEAVE, lambda _e: text_widget.configure(cursor="xterm"))
 
     def add_attachment_tabs(self, parent_notebook, title, block_content):
         direction_frame = ttk.Frame(parent_notebook)
@@ -358,10 +509,13 @@ class GmailReportApp:
                 continue
 
             tab_title = os.path.basename(path)
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read()
+            if path.lower().endswith(".csv"):
+                self.add_csv_grid_tab(self.drive_notebook, tab_title, path)
+            else:
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read()
 
-            self.add_text_tab(self.drive_notebook, tab_title, content)
+                self.add_text_tab(self.drive_notebook, tab_title, content)
 
     def start_drive_report(self):
         drive_email = self.drive_email_var.get().strip()
