@@ -1,7 +1,6 @@
 import os
 import queue
 import threading
-import traceback
 import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
@@ -10,15 +9,21 @@ from gmail_stats import process
 
 
 class GmailReportApp:
+    VERTICAL_NOTEBOOK_STYLE = "Vertical.TNotebook"
+
     def __init__(self, root):
         self.root = root
         self.root.title("Reporte de limpieza Gmail")
         self.root.geometry("980x680")
 
+        self.style = ttk.Style(self.root)
+        self.style.configure(self.VERTICAL_NOTEBOOK_STYLE, tabposition="wn")
+        self.style.configure(f"{self.VERTICAL_NOTEBOOK_STYLE}.Tab", padding=(10, 6))
+
         self.events = queue.Queue()
         self.worker_thread = None
 
-        main = ttk.Frame(root, padding=12)
+        main = ttk.Frame(root, padding=8)
         main.pack(fill="both", expand=True)
 
         header = ttk.Label(
@@ -29,10 +34,10 @@ class GmailReportApp:
             ),
             justify="left",
         )
-        header.pack(anchor="w", pady=(0, 10))
+        header.pack(anchor="w", pady=(0, 6))
 
         form = ttk.Frame(main)
-        form.pack(fill="x", pady=(0, 10))
+        form.pack(fill="x", pady=(0, 6))
 
         ttk.Label(form, text="Correo Gmail:").pack(side="left")
         self.email_var = tk.StringVar()
@@ -43,11 +48,17 @@ class GmailReportApp:
         self.run_button.pack(side="left")
 
         ttk.Label(main, text="Estado / progreso:").pack(anchor="w")
-        self.log_box = ScrolledText(main, height=14, wrap="word", state="disabled")
-        self.log_box.pack(fill="x", pady=(4, 12))
+        self.log_box = ScrolledText(main, height=8, wrap="word", state="disabled")
+        self.log_box.pack(fill="x", pady=(2, 6))
+
+        ttk.Label(main, text="Resumen:").pack(anchor="w")
+        self.summary_box = ScrolledText(main, height=5, wrap="word", state="disabled")
+        self.summary_box.pack(fill="x", pady=(2, 6))
+        self.summary_box.tag_configure("summary_cached", foreground="#0B7A3E")
+        self.summary_box.tag_configure("summary_new", foreground="#0B5394")
 
         ttk.Label(main, text="Archivos generados:").pack(anchor="w")
-        self.notebook = ttk.Notebook(main)
+        self.notebook = ttk.Notebook(main, style=self.VERTICAL_NOTEBOOK_STYLE)
         self.notebook.pack(fill="both", expand=True)
 
         self.root.after(120, self.consume_events)
@@ -69,6 +80,38 @@ class GmailReportApp:
     def clear_tabs(self):
         for tab_id in self.notebook.tabs():
             self.notebook.forget(tab_id)
+
+    def set_summary(self, summary):
+        source_tag = None
+        if not summary:
+            text = "Resumen no disponible."
+        else:
+            source = summary.get("source", "")
+            last_scan = summary.get("last_scan") or "No registrado"
+            detail = summary.get("detail", {})
+
+            source_label = "Nuevo escaneo" if source == "new_scan" else "Cargado desde escaneo previo"
+            source_tag = "summary_new" if source == "new_scan" else "summary_cached"
+            rec_with = detail.get("received_with_attachments", 0)
+            rec_without = detail.get("received_without_attachments", 0)
+            sent_with = detail.get("sent_with_attachments", 0)
+            sent_without = detail.get("sent_without_attachments", 0)
+            total = rec_with + rec_without + sent_with + sent_without
+
+            text = (
+                f"Origen: {source_label}\n"
+                f"Último escaneo: {last_scan}\n"
+                f"Recibidos: con adjuntos={rec_with} | sin adjuntos={rec_without}\n"
+                f"Enviados: con adjuntos={sent_with} | sin adjuntos={sent_without}\n"
+                f"Total registros considerados: {total}"
+            )
+
+        self.summary_box.configure(state="normal")
+        self.summary_box.delete("1.0", "end")
+        self.summary_box.insert("1.0", text)
+        if source_tag:
+            self.summary_box.tag_add(source_tag, "1.0", "1.end")
+        self.summary_box.configure(state="disabled")
 
     @staticmethod
     def extract_sections(content, header_a, header_b):
@@ -97,7 +140,7 @@ class GmailReportApp:
     def add_attachment_tabs(self, parent_notebook, title, block_content):
         direction_frame = ttk.Frame(parent_notebook)
         parent_notebook.add(direction_frame, text=title)
-        attachment_notebook = ttk.Notebook(direction_frame)
+        attachment_notebook = ttk.Notebook(direction_frame, style=self.VERTICAL_NOTEBOOK_STYLE)
         attachment_notebook.pack(fill="both", expand=True)
 
         con_adjuntos, sin_adjuntos = self.extract_sections(
@@ -124,7 +167,7 @@ class GmailReportApp:
 
             detalle_tab = ttk.Frame(self.notebook)
             self.notebook.add(detalle_tab, text="Detalle correos")
-            detalle_notebook = ttk.Notebook(detalle_tab)
+            detalle_notebook = ttk.Notebook(detalle_tab, style=self.VERTICAL_NOTEBOOK_STYLE)
             detalle_notebook.pack(fill="both", expand=True)
 
             recibidos, enviados = self.extract_sections(
@@ -147,7 +190,7 @@ class GmailReportApp:
 
             dominios_tab = ttk.Frame(self.notebook)
             self.notebook.add(dominios_tab, text="Dominios")
-            dominios_notebook = ttk.Notebook(dominios_tab)
+            dominios_notebook = ttk.Notebook(dominios_tab, style=self.VERTICAL_NOTEBOOK_STYLE)
             dominios_notebook.pack(fill="both", expand=True)
 
             recibidos_dom, enviados_dom = self.extract_sections(
@@ -173,6 +216,7 @@ class GmailReportApp:
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
+        self.set_summary(None)
         self.clear_tabs()
 
         self.append_log(f"▶️ Iniciando análisis para: {email}")
@@ -186,10 +230,10 @@ class GmailReportApp:
             self.events.put(("log", message))
 
         try:
-            files = process(user_email=email, log=emit)
-            self.events.put(("done", files))
-        except Exception:
-            self.events.put(("error", traceback.format_exc()))
+            result = process(user_email=email, log=emit)
+            self.events.put(("done", result))
+        except Exception as exc:
+            self.events.put(("error", str(exc)))
 
     def consume_events(self):
         try:
@@ -199,7 +243,10 @@ class GmailReportApp:
                     self.append_log(payload)
                 elif event == "done":
                     self.set_running(False)
-                    self.build_tabs(payload)
+                    files = payload.get("files", []) if isinstance(payload, dict) else payload
+                    summary = payload.get("summary") if isinstance(payload, dict) else None
+                    self.build_tabs(files)
+                    self.set_summary(summary)
                     self.append_log("✅ Reporte finalizado y cargado en pestañas.")
                 elif event == "error":
                     self.set_running(False)

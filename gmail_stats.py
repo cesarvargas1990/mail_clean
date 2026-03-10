@@ -3,6 +3,7 @@ import json
 import multiprocessing as mp
 from collections import defaultdict
 from datetime import datetime, timedelta
+from glob import glob
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -16,6 +17,7 @@ SCAN_STATE_FILE = "gmail_scan_state.json"
 MAX_SCAN_AGE_DAYS = 2
 CURRENT_USER_ID = "me"
 CURRENT_TOKEN_FILE = TOKEN_GMAIL_DEFAULT
+CREDENTIAL_CANDIDATES = ["credentials.json", "client_secret.json"]
 
 
 def _safe_token_file(user_email):
@@ -90,12 +92,37 @@ def update_last_scan(user_id):
     save_scan_state(state)
 
 
+def get_last_scan(user_id):
+    state = load_scan_state()
+    user_state = state.get(_safe_user_key(user_id), {})
+    return user_state.get("last_scan")
+
+
+def find_client_secrets_file():
+    for path in CREDENTIAL_CANDIDATES:
+        if os.path.exists(path):
+            return path
+
+    extra_candidates = sorted(glob("client_secret*.json"))
+    if extra_candidates:
+        return extra_candidates[0]
+
+    return None
+
+
 def get_service(token_file=TOKEN_GMAIL_DEFAULT):
     """Crea un cliente Gmail API aislado por proceso."""
     if os.path.exists(token_file):
         creds = Credentials.from_authorized_user_file(token_file, SCOPES)
     else:
-        flow = InstalledAppFlow.from_client_secrets_file("credentials.json", SCOPES)
+        client_secrets_file = find_client_secrets_file()
+        if not client_secrets_file:
+            raise RuntimeError(
+                "No se encontró archivo de credenciales OAuth. "
+                "Coloca credentials.json o client_secret.json en la carpeta del proyecto."
+            )
+
+        flow = InstalledAppFlow.from_client_secrets_file(client_secrets_file, SCOPES)
         creds = flow.run_local_server(port=0)
         with open(token_file, "w") as f:
             f.write(creds.to_json())
@@ -326,6 +353,86 @@ def write_domain_report(
         )
 
 
+def sum_counter_lines(text):
+    total = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if "→" not in line:
+            continue
+        raw_count = line.split("→", 1)[0].strip()
+        try:
+            total += int(raw_count)
+        except ValueError:
+            continue
+    return total
+
+
+def extract_sections(content, header_a, header_b):
+    idx_a = content.find(header_a)
+    idx_b = content.find(header_b)
+    if idx_a == -1 or idx_b == -1:
+        return None, None
+
+    if idx_a < idx_b:
+        section_a = content[idx_a + len(header_a):idx_b].strip()
+        section_b = content[idx_b + len(header_b):].strip()
+    else:
+        section_b = content[idx_b + len(header_b):idx_a].strip()
+        section_a = content[idx_a + len(header_a):].strip()
+
+    return section_a, section_b
+
+
+def extract_attachment_sections(block_content):
+    return extract_sections(block_content, "--- CON ADJUNTOS ---", "--- SIN ADJUNTOS ---")
+
+
+def parse_detail_summary(path=DETAIL_REPORT_FILE):
+    if not os.path.exists(path):
+        return {
+            "received_with_attachments": 0,
+            "received_without_attachments": 0,
+            "sent_with_attachments": 0,
+            "sent_without_attachments": 0,
+        }
+
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    received_block, sent_block = extract_sections(
+        content,
+        "===== REMITENTES (RECIBIDOS) =====",
+        "===== DESTINATARIOS (ENVIADOS) =====",
+    )
+
+    if received_block is None or sent_block is None:
+        return {
+            "received_with_attachments": 0,
+            "received_without_attachments": 0,
+            "sent_with_attachments": 0,
+            "sent_without_attachments": 0,
+        }
+
+    received_with, received_without = extract_attachment_sections(received_block)
+    sent_with, sent_without = extract_attachment_sections(sent_block)
+
+    return {
+        "received_with_attachments": sum_counter_lines(received_with or ""),
+        "received_without_attachments": sum_counter_lines(received_without or ""),
+        "sent_with_attachments": sum_counter_lines(sent_with or ""),
+        "sent_without_attachments": sum_counter_lines(sent_without or ""),
+    }
+
+
+def build_summary(user_id, source):
+    detail = parse_detail_summary(DETAIL_REPORT_FILE)
+    return {
+        "source": source,
+        "last_scan": get_last_scan(user_id),
+        "detail": detail,
+    }
+
+
 def process(user_email=None, processes=PROCESSES, log=print):
     user_id = (user_email or "").strip() or "me"
     token_file = _safe_token_file(user_id)
@@ -335,7 +442,10 @@ def process(user_email=None, processes=PROCESSES, log=print):
     if not refresh_required:
         logger(f"ℹ️ {refresh_reason}")
         logger("📁 Cargando reportes existentes sin reautenticación.")
-        return [DETAIL_REPORT_FILE, DOMAIN_REPORT_FILE]
+        return {
+            "files": [DETAIL_REPORT_FILE, DOMAIN_REPORT_FILE],
+            "summary": build_summary(user_id, "cache"),
+        }
 
     logger(f"ℹ️ {refresh_reason}")
     if os.path.exists(token_file):
@@ -410,7 +520,10 @@ def process(user_email=None, processes=PROCESSES, log=print):
     logger(f"🗓️ Fecha de último escaneo guardada en: {SCAN_STATE_FILE}")
 
     logger("\n✅ PROCESAMIENTO COMPLETO\n")
-    return [DETAIL_REPORT_FILE, DOMAIN_REPORT_FILE]
+    return {
+        "files": [DETAIL_REPORT_FILE, DOMAIN_REPORT_FILE],
+        "summary": build_summary(user_id, "new_scan"),
+    }
 
 
 if __name__ == "__main__":
