@@ -33,6 +33,15 @@ def _safe_user_key(user_email):
     return user_email or "me"
 
 
+def get_report_files(user_email):
+    user_key = _safe_user_key(user_email)
+    safe = "".join(c if c.isalnum() else "_" for c in user_key)
+    return {
+        "detail": f"detalle_correos_{safe}.txt",
+        "domain": f"dominios_{safe}.txt",
+    }
+
+
 def load_scan_state():
     if not os.path.exists(SCAN_STATE_FILE):
         return {}
@@ -52,12 +61,12 @@ def save_scan_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def reports_exist():
-    return os.path.exists(DETAIL_REPORT_FILE) and os.path.exists(DOMAIN_REPORT_FILE)
+def reports_exist(report_files):
+    return os.path.exists(report_files["detail"]) and os.path.exists(report_files["domain"])
 
 
-def should_refresh_scan(user_id, token_file):
-    if not reports_exist():
+def should_refresh_scan(user_id, token_file, report_files):
+    if not reports_exist(report_files):
         return True, "No existen reportes previos."
 
     if not os.path.exists(token_file):
@@ -82,12 +91,12 @@ def should_refresh_scan(user_id, token_file):
     return False, "Escaneo reciente; se usarán archivos existentes."
 
 
-def update_last_scan(user_id):
+def update_last_scan(user_id, report_files):
     state = load_scan_state()
     user_key = _safe_user_key(user_id)
     state[user_key] = {
         "last_scan": datetime.now().isoformat(timespec="seconds"),
-        "files": [DETAIL_REPORT_FILE, DOMAIN_REPORT_FILE],
+        "files": [report_files["detail"], report_files["domain"]],
     }
     save_scan_state(state)
 
@@ -424,8 +433,8 @@ def parse_detail_summary(path=DETAIL_REPORT_FILE):
     }
 
 
-def build_summary(user_id, source):
-    detail = parse_detail_summary(DETAIL_REPORT_FILE)
+def build_summary(user_id, source, report_files):
+    detail = parse_detail_summary(report_files["detail"])
     return {
         "source": source,
         "last_scan": get_last_scan(user_id),
@@ -436,15 +445,18 @@ def build_summary(user_id, source):
 def process(user_email=None, processes=PROCESSES, log=print):
     user_id = (user_email or "").strip() or "me"
     token_file = _safe_token_file(user_id)
+    report_files = get_report_files(user_id)
+    detail_report_file = report_files["detail"]
+    domain_report_file = report_files["domain"]
     logger = log if callable(log) else print
 
-    refresh_required, refresh_reason = should_refresh_scan(user_id, token_file)
+    refresh_required, refresh_reason = should_refresh_scan(user_id, token_file, report_files)
     if not refresh_required:
         logger(f"ℹ️ {refresh_reason}")
         logger("📁 Cargando reportes existentes sin reautenticación.")
         return {
-            "files": [DETAIL_REPORT_FILE, DOMAIN_REPORT_FILE],
-            "summary": build_summary(user_id, "cache"),
+            "files": [detail_report_file, domain_report_file],
+            "summary": build_summary(user_id, "cache", report_files),
         }
 
     logger(f"ℹ️ {refresh_reason}")
@@ -498,10 +510,10 @@ def process(user_email=None, processes=PROCESSES, log=print):
         from_without_attachments,
         to_with_attachments,
         to_without_attachments,
-        DETAIL_REPORT_FILE,
+        detail_report_file,
     )
 
-    logger(f"📄 Archivo generado: {DETAIL_REPORT_FILE}")
+    logger(f"📄 Archivo generado: {detail_report_file}")
 
     # -------------------------------------------
     # 📁 ARCHIVO 2: dominios por recibidos/enviados
@@ -511,18 +523,18 @@ def process(user_email=None, processes=PROCESSES, log=print):
         from_without_attachments,
         to_with_attachments,
         to_without_attachments,
-        DOMAIN_REPORT_FILE,
+        domain_report_file,
     )
 
-    logger(f"📄 Archivo generado: {DOMAIN_REPORT_FILE}")
+    logger(f"📄 Archivo generado: {domain_report_file}")
 
-    update_last_scan(user_id)
+    update_last_scan(user_id, report_files)
     logger(f"🗓️ Fecha de último escaneo guardada en: {SCAN_STATE_FILE}")
 
     logger("\n✅ PROCESAMIENTO COMPLETO\n")
     return {
-        "files": [DETAIL_REPORT_FILE, DOMAIN_REPORT_FILE],
-        "summary": build_summary(user_id, "new_scan"),
+        "files": [detail_report_file, domain_report_file],
+        "summary": build_summary(user_id, "new_scan", report_files),
     }
 
 

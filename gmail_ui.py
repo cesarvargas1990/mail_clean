@@ -155,57 +155,70 @@ class GmailReportApp:
         else:
             self.add_text_tab(attachment_notebook, "Completo", block_content)
 
+    @staticmethod
+    def find_report_path(files, dynamic_prefix, legacy_name):
+        path = next((f for f in files if os.path.basename(f).startswith(dynamic_prefix)), None)
+        if not path and legacy_name in files:
+            path = legacy_name
+        return path
+
+    def render_detail_tabs(self, detalle_path):
+        with open(detalle_path, "r", encoding="utf-8") as f:
+            detalle_content = f.read()
+
+        detalle_tab = ttk.Frame(self.notebook)
+        self.notebook.add(detalle_tab, text="Detalle correos")
+        detalle_notebook = ttk.Notebook(detalle_tab, style=self.VERTICAL_NOTEBOOK_STYLE)
+        detalle_notebook.pack(fill="both", expand=True)
+
+        recibidos, enviados = self.extract_sections(
+            detalle_content,
+            "===== REMITENTES (RECIBIDOS) =====",
+            "===== DESTINATARIOS (ENVIADOS) =====",
+        )
+
+        if recibidos is not None and enviados is not None:
+            self.add_attachment_tabs(detalle_notebook, "Recibidos", recibidos)
+            self.add_attachment_tabs(detalle_notebook, "Enviados", enviados)
+        else:
+            self.add_text_tab(detalle_notebook, "Completo", detalle_content)
+
+    def render_domain_tabs(self, dominios_path):
+        with open(dominios_path, "r", encoding="utf-8") as f:
+            dominios_content = f.read()
+
+        dominios_tab = ttk.Frame(self.notebook)
+        self.notebook.add(dominios_tab, text="Dominios")
+        dominios_notebook = ttk.Notebook(dominios_tab, style=self.VERTICAL_NOTEBOOK_STYLE)
+        dominios_notebook.pack(fill="both", expand=True)
+
+        recibidos_dom, enviados_dom = self.extract_sections(
+            dominios_content,
+            "===== DOMINIOS REMITENTES (RECIBIDOS) =====",
+            "===== DOMINIOS DESTINATARIOS (ENVIADOS) =====",
+        )
+
+        if recibidos_dom is not None and enviados_dom is not None:
+            self.add_attachment_tabs(dominios_notebook, "Recibidos", recibidos_dom)
+            self.add_attachment_tabs(dominios_notebook, "Enviados", enviados_dom)
+        else:
+            self.add_text_tab(dominios_notebook, "Completo", dominios_content)
+
     def build_tabs(self, files):
         self.clear_tabs()
 
-        detalle_path = "detalle_correos.txt"
-        dominios_path = "dominios.txt"
+        detalle_path = self.find_report_path(files, "detalle_correos_", "detalle_correos.txt")
+        dominios_path = self.find_report_path(files, "dominios_", "dominios.txt")
 
-        if detalle_path in files and os.path.exists(detalle_path):
-            with open(detalle_path, "r", encoding="utf-8") as f:
-                detalle_content = f.read()
-
-            detalle_tab = ttk.Frame(self.notebook)
-            self.notebook.add(detalle_tab, text="Detalle correos")
-            detalle_notebook = ttk.Notebook(detalle_tab, style=self.VERTICAL_NOTEBOOK_STYLE)
-            detalle_notebook.pack(fill="both", expand=True)
-
-            recibidos, enviados = self.extract_sections(
-                detalle_content,
-                "===== REMITENTES (RECIBIDOS) =====",
-                "===== DESTINATARIOS (ENVIADOS) =====",
-            )
-
-            if recibidos is not None and enviados is not None:
-                self.add_attachment_tabs(detalle_notebook, "Recibidos", recibidos)
-                self.add_attachment_tabs(detalle_notebook, "Enviados", enviados)
-            else:
-                self.add_text_tab(detalle_notebook, "Completo", detalle_content)
+        if detalle_path and os.path.exists(detalle_path):
+            self.render_detail_tabs(detalle_path)
         else:
-            self.append_log(f"⚠️ No se encontró el archivo esperado: {detalle_path}")
+            self.append_log("⚠️ No se encontró el archivo esperado de detalle_correos.")
 
-        if dominios_path in files and os.path.exists(dominios_path):
-            with open(dominios_path, "r", encoding="utf-8") as f:
-                dominios_content = f.read()
-
-            dominios_tab = ttk.Frame(self.notebook)
-            self.notebook.add(dominios_tab, text="Dominios")
-            dominios_notebook = ttk.Notebook(dominios_tab, style=self.VERTICAL_NOTEBOOK_STYLE)
-            dominios_notebook.pack(fill="both", expand=True)
-
-            recibidos_dom, enviados_dom = self.extract_sections(
-                dominios_content,
-                "===== DOMINIOS REMITENTES (RECIBIDOS) =====",
-                "===== DOMINIOS DESTINATARIOS (ENVIADOS) =====",
-            )
-
-            if recibidos_dom is not None and enviados_dom is not None:
-                self.add_attachment_tabs(dominios_notebook, "Recibidos", recibidos_dom)
-                self.add_attachment_tabs(dominios_notebook, "Enviados", enviados_dom)
-            else:
-                self.add_text_tab(dominios_notebook, "Completo", dominios_content)
+        if dominios_path and os.path.exists(dominios_path):
+            self.render_domain_tabs(dominios_path)
         else:
-            self.append_log(f"⚠️ No se encontró el archivo esperado: {dominios_path}")
+            self.append_log("⚠️ No se encontró el archivo esperado de dominios.")
 
     def start_report(self):
         email = self.email_var.get().strip()
