@@ -1,6 +1,7 @@
 # Credenciales y tokens sensibles
 credentials.json
 *token*.json
+*token*.pickle
 
 # Variables de entorno y secretos
 .env
