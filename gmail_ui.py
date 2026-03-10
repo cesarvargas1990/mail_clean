@@ -25,7 +25,7 @@ class GmailReportApp:
             main,
             text=(
                 "Esta herramienta analiza tu Gmail y genera reportes para facilitar\n"
-                "la limpieza manual de correos (remitentes/destinatarios y dominios)."
+                "la limpieza manual de correos (recibidos/enviados y con/sin adjuntos)."
             ),
             justify="left",
         )
@@ -94,6 +94,24 @@ class GmailReportApp:
         content.insert("1.0", text)
         content.configure(state="disabled")
 
+    def add_attachment_tabs(self, parent_notebook, title, block_content):
+        direction_frame = ttk.Frame(parent_notebook)
+        parent_notebook.add(direction_frame, text=title)
+        attachment_notebook = ttk.Notebook(direction_frame)
+        attachment_notebook.pack(fill="both", expand=True)
+
+        con_adjuntos, sin_adjuntos = self.extract_sections(
+            block_content,
+            "--- CON ADJUNTOS ---",
+            "--- SIN ADJUNTOS ---",
+        )
+
+        if con_adjuntos is not None and sin_adjuntos is not None:
+            self.add_text_tab(attachment_notebook, "Con adjuntos", con_adjuntos)
+            self.add_text_tab(attachment_notebook, "Sin adjuntos", sin_adjuntos)
+        else:
+            self.add_text_tab(attachment_notebook, "Completo", block_content)
+
     def build_tabs(self, files):
         self.clear_tabs()
 
@@ -111,13 +129,13 @@ class GmailReportApp:
 
             recibidos, enviados = self.extract_sections(
                 detalle_content,
-                "===== REMITENTES =====",
-                "===== DESTINATARIOS =====",
+                "===== REMITENTES (RECIBIDOS) =====",
+                "===== DESTINATARIOS (ENVIADOS) =====",
             )
 
             if recibidos is not None and enviados is not None:
-                self.add_text_tab(detalle_notebook, "Recibidos", recibidos)
-                self.add_text_tab(detalle_notebook, "Enviados", enviados)
+                self.add_attachment_tabs(detalle_notebook, "Recibidos", recibidos)
+                self.add_attachment_tabs(detalle_notebook, "Enviados", enviados)
             else:
                 self.add_text_tab(detalle_notebook, "Completo", detalle_content)
         else:
@@ -139,8 +157,8 @@ class GmailReportApp:
             )
 
             if recibidos_dom is not None and enviados_dom is not None:
-                self.add_text_tab(dominios_notebook, "Recibidos", recibidos_dom)
-                self.add_text_tab(dominios_notebook, "Enviados", enviados_dom)
+                self.add_attachment_tabs(dominios_notebook, "Recibidos", recibidos_dom)
+                self.add_attachment_tabs(dominios_notebook, "Enviados", enviados_dom)
             else:
                 self.add_text_tab(dominios_notebook, "Completo", dominios_content)
         else:

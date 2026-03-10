@@ -2,6 +2,7 @@ import os
 import json
 import multiprocessing as mp
 from collections import defaultdict
+from datetime import datetime, timedelta
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -11,6 +12,8 @@ PROCESSES = 12
 TOKEN_GMAIL_DEFAULT = "token_gmail.json"
 DETAIL_REPORT_FILE = "detalle_correos.txt"
 DOMAIN_REPORT_FILE = "dominios.txt"
+SCAN_STATE_FILE = "gmail_scan_state.json"
+MAX_SCAN_AGE_DAYS = 2
 CURRENT_USER_ID = "me"
 CURRENT_TOKEN_FILE = TOKEN_GMAIL_DEFAULT
 
@@ -21,6 +24,70 @@ def _safe_token_file(user_email):
         return TOKEN_GMAIL_DEFAULT
     clean = "".join(c if c.isalnum() else "_" for c in user_email)
     return f"token_gmail_{clean}.json"
+
+
+def _safe_user_key(user_email):
+    user_email = (user_email or "").strip().lower()
+    return user_email or "me"
+
+
+def load_scan_state():
+    if not os.path.exists(SCAN_STATE_FILE):
+        return {}
+
+    try:
+        with open(SCAN_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+        return {}
+    except Exception:
+        return {}
+
+
+def save_scan_state(state):
+    with open(SCAN_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+
+def reports_exist():
+    return os.path.exists(DETAIL_REPORT_FILE) and os.path.exists(DOMAIN_REPORT_FILE)
+
+
+def should_refresh_scan(user_id, token_file):
+    if not reports_exist():
+        return True, "No existen reportes previos."
+
+    if not os.path.exists(token_file):
+        return True, "No hay credenciales guardadas para este correo."
+
+    state = load_scan_state()
+    user_key = _safe_user_key(user_id)
+    user_state = state.get(user_key, {})
+    last_scan = user_state.get("last_scan")
+
+    if not last_scan:
+        return True, "No hay fecha de último escaneo registrada."
+
+    try:
+        last_scan_dt = datetime.fromisoformat(last_scan)
+    except Exception:
+        return True, "La fecha de último escaneo es inválida."
+
+    if datetime.now() - last_scan_dt > timedelta(days=MAX_SCAN_AGE_DAYS):
+        return True, "La sesión superó los 2 días; se requiere nuevo login."
+
+    return False, "Escaneo reciente; se usarán archivos existentes."
+
+
+def update_last_scan(user_id):
+    state = load_scan_state()
+    user_key = _safe_user_key(user_id)
+    state[user_key] = {
+        "last_scan": datetime.now().isoformat(timespec="seconds"),
+        "files": [DETAIL_REPORT_FILE, DOMAIN_REPORT_FILE],
+    }
+    save_scan_state(state)
 
 
 def get_service(token_file=TOKEN_GMAIL_DEFAULT):
@@ -47,36 +114,98 @@ def extract_domain(email):
     return "desconocido"
 
 
+def message_has_attachments(payload):
+    if not payload:
+        return False
+
+    body = payload.get("body", {})
+    filename = payload.get("filename", "")
+
+    if filename and body.get("attachmentId"):
+        return True
+
+    for part in payload.get("parts", []):
+        if message_has_attachments(part):
+            return True
+
+    return False
+
+
+def update_message_party_counters(
+    header_name,
+    header_value,
+    has_attachments,
+    from_local,
+    to_local,
+    from_with_attachments_local,
+    from_without_attachments_local,
+    to_with_attachments_local,
+    to_without_attachments_local,
+):
+    if header_name == "From":
+        from_local[header_value] += 1
+        if has_attachments:
+            from_with_attachments_local[header_value] += 1
+        else:
+            from_without_attachments_local[header_value] += 1
+        return
+
+    if header_name == "To":
+        to_local[header_value] += 1
+        if has_attachments:
+            to_with_attachments_local[header_value] += 1
+        else:
+            to_without_attachments_local[header_value] += 1
+
+
 def process_chunk(ids_chunk):
     """Procesa un grupo de mensajes en un proceso independiente."""
     service = get_service(CURRENT_TOKEN_FILE)
     from_local = defaultdict(int)
     to_local = defaultdict(int)
+    from_with_attachments_local = defaultdict(int)
+    from_without_attachments_local = defaultdict(int)
+    to_with_attachments_local = defaultdict(int)
+    to_without_attachments_local = defaultdict(int)
 
     for msg_id in ids_chunk:
         try:
             msg = service.users().messages().get(
                 userId=CURRENT_USER_ID,
                 id=msg_id,
-                format="metadata",
-                metadataHeaders=["From", "To"]
+                format="full"
             ).execute()
 
-            headers = msg.get("payload", {}).get("headers", [])
+            payload = msg.get("payload", {})
+            headers = payload.get("headers", [])
+            has_attachments = message_has_attachments(payload)
 
             for h in headers:
                 name = h["name"]
                 value = h["value"]
-
-                if name == "From":
-                    from_local[value] += 1
-                elif name == "To":
-                    to_local[value] += 1
+                update_message_party_counters(
+                    name,
+                    value,
+                    has_attachments,
+                    from_local,
+                    to_local,
+                    from_with_attachments_local,
+                    from_without_attachments_local,
+                    to_with_attachments_local,
+                    to_without_attachments_local,
+                )
 
         except Exception:
             pass
 
-    return dict(from_local), dict(to_local)
+    return (
+        dict(from_local),
+        dict(to_local),
+        dict(from_with_attachments_local),
+        dict(from_without_attachments_local),
+        dict(to_with_attachments_local),
+        dict(to_without_attachments_local),
+    )
 
 
 def merge_dicts(a, b):
@@ -109,32 +238,112 @@ def list_message_ids(service, user_id):
     return ids
 
 
-def write_domain_report(from_counter, to_counter, path=DOMAIN_REPORT_FILE):
+def write_counter_block(file_obj, title, with_attachments, without_attachments):
+    file_obj.write(f"===== {title} =====\n")
+    file_obj.write("--- CON ADJUNTOS ---\n")
+    for item, count in sorted(with_attachments.items(), key=lambda x: x[1], reverse=True):
+        file_obj.write(f"{count} → {item}\n")
+
+    file_obj.write("\n--- SIN ADJUNTOS ---\n")
+    for item, count in sorted(without_attachments.items(), key=lambda x: x[1], reverse=True):
+        file_obj.write(f"{count} → {item}\n")
+
+
+def write_detail_report(
+    from_with_attachments,
+    from_without_attachments,
+    to_with_attachments,
+    to_without_attachments,
+    path=DETAIL_REPORT_FILE,
+):
+    with open(path, "w", encoding="utf-8") as f:
+        write_counter_block(
+            f,
+            "REMITENTES (RECIBIDOS)",
+            from_with_attachments,
+            from_without_attachments,
+        )
+
+        f.write("\n\n")
+
+        write_counter_block(
+            f,
+            "DESTINATARIOS (ENVIADOS)",
+            to_with_attachments,
+            to_without_attachments,
+        )
+
+
+def write_domain_report(
+    from_with_attachments,
+    from_without_attachments,
+    to_with_attachments,
+    to_without_attachments,
+    path=DOMAIN_REPORT_FILE,
+):
     domain_from_map = defaultdict(int)
     domain_to_map = defaultdict(int)
+    domain_from_with_attachments = defaultdict(int)
+    domain_from_without_attachments = defaultdict(int)
+    domain_to_with_attachments = defaultdict(int)
+    domain_to_without_attachments = defaultdict(int)
 
-    for sender, count in from_counter.items():
+    for sender, count in from_with_attachments.items():
         domain = extract_domain(sender)
         domain_from_map[domain] += count
+        domain_from_with_attachments[domain] += count
 
-    for rec, count in to_counter.items():
+    for sender, count in from_without_attachments.items():
+        domain = extract_domain(sender)
+        domain_from_map[domain] += count
+        domain_from_without_attachments[domain] += count
+
+    for rec, count in to_with_attachments.items():
         domain = extract_domain(rec)
         domain_to_map[domain] += count
+        domain_to_with_attachments[domain] += count
+
+    for rec, count in to_without_attachments.items():
+        domain = extract_domain(rec)
+        domain_to_map[domain] += count
+        domain_to_without_attachments[domain] += count
 
     with open(path, "w", encoding="utf-8") as f:
-        f.write("===== DOMINIOS REMITENTES (RECIBIDOS) =====\n")
-        for dom, count in sorted(domain_from_map.items(), key=lambda x: x[1], reverse=True):
-            f.write(f"{count} → {dom}\n")
+        write_counter_block(
+            f,
+            "DOMINIOS REMITENTES (RECIBIDOS)",
+            domain_from_with_attachments,
+            domain_from_without_attachments,
+        )
 
-        f.write("\n\n===== DOMINIOS DESTINATARIOS (ENVIADOS) =====\n")
-        for dom, count in sorted(domain_to_map.items(), key=lambda x: x[1], reverse=True):
-            f.write(f"{count} → {dom}\n")
+        f.write("\n\n")
+
+        write_counter_block(
+            f,
+            "DOMINIOS DESTINATARIOS (ENVIADOS)",
+            domain_to_with_attachments,
+            domain_to_without_attachments,
+        )
 
 
 def process(user_email=None, processes=PROCESSES, log=print):
     user_id = (user_email or "").strip() or "me"
     token_file = _safe_token_file(user_id)
     logger = log if callable(log) else print
+
+    refresh_required, refresh_reason = should_refresh_scan(user_id, token_file)
+    if not refresh_required:
+        logger(f"ℹ️ {refresh_reason}")
+        logger("📁 Cargando reportes existentes sin reautenticación.")
+        return [DETAIL_REPORT_FILE, DOMAIN_REPORT_FILE]
+
+    logger(f"ℹ️ {refresh_reason}")
+    if os.path.exists(token_file):
+        try:
+            os.remove(token_file)
+            logger("🔁 Token anterior eliminado para forzar nuevo login.")
+        except Exception:
+            logger("⚠️ No se pudo eliminar el token anterior; se intentará continuar.")
 
     logger("🔐 Autenticando...")
     service = get_service(token_file)
@@ -158,31 +367,47 @@ def process(user_email=None, processes=PROCESSES, log=print):
 
     from_counter = {}
     to_counter = {}
+    from_with_attachments = {}
+    from_without_attachments = {}
+    to_with_attachments = {}
+    to_without_attachments = {}
 
-    for f, t in results:
+    for f, t, f_with, f_without, t_with, t_without in results:
         merge_dicts(from_counter, f)
         merge_dicts(to_counter, t)
+        merge_dicts(from_with_attachments, f_with)
+        merge_dicts(from_without_attachments, f_without)
+        merge_dicts(to_with_attachments, t_with)
+        merge_dicts(to_without_attachments, t_without)
 
     # -------------------------------------------
     # 📁 ARCHIVO 1: detalle completo
     # -------------------------------------------
-    with open(DETAIL_REPORT_FILE, "w", encoding="utf-8") as f:
-        f.write("===== REMITENTES =====\n")
-        for sender, count in sorted(from_counter.items(), key=lambda x: x[1], reverse=True):
-            f.write(f"{count} → {sender}\n")
-
-        f.write("\n\n===== DESTINATARIOS =====\n")
-        for rec, count in sorted(to_counter.items(), key=lambda x: x[1], reverse=True):
-            f.write(f"{count} → {rec}\n")
+    write_detail_report(
+        from_with_attachments,
+        from_without_attachments,
+        to_with_attachments,
+        to_without_attachments,
+        DETAIL_REPORT_FILE,
+    )
 
     logger(f"📄 Archivo generado: {DETAIL_REPORT_FILE}")
 
     # -------------------------------------------
     # 📁 ARCHIVO 2: dominios por recibidos/enviados
     # -------------------------------------------
-    write_domain_report(from_counter, to_counter, DOMAIN_REPORT_FILE)
+    write_domain_report(
+        from_with_attachments,
+        from_without_attachments,
+        to_with_attachments,
+        to_without_attachments,
+        DOMAIN_REPORT_FILE,
+    )
 
     logger(f"📄 Archivo generado: {DOMAIN_REPORT_FILE}")
+
+    update_last_scan(user_id)
+    logger(f"🗓️ Fecha de último escaneo guardada en: {SCAN_STATE_FILE}")
 
     logger("\n✅ PROCESAMIENTO COMPLETO\n")
     return [DETAIL_REPORT_FILE, DOMAIN_REPORT_FILE]
