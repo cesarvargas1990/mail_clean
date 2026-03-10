@@ -1,61 +1,145 @@
-import json
+import os
+from glob import glob
+
 import requests
 import msal
 
-# -----------------------------
-# CONFIGURACIÓN EXACTA
-# -----------------------------
-TENANT_ID = "common"   # Para cuentas Outlook/Hotmail personales
-CLIENT_ID = "04f0c124-f2bc-4f59-8241-bf6df9866bbd"  # Cliente oficial Microsoft
-
-# SOLO scopes válidos para MSAL Device Flow
+TENANT_ID = "common"
+CLIENT_ID = "537b2720-a1e6-4f38-804f-241ec44f5163"
 SCOPES = [
-    "Files.ReadWrite.All",
-    "Files.Read.All",
     "Files.Read",
     "User.Read",
 ]
+CREDENTIAL_CANDIDATES = ["credentials.json", "client_secret.json"]
 
-# -----------------------------
-# OBTENER TOKEN (device flow)
-# -----------------------------
-def get_token():
-    app = msal.PublicClientApplication(CLIENT_ID, authority=f"https://login.microsoftonline.com/{TENANT_ID}")
 
-    flow = app.initiate_device_flow(scopes=SCOPES)
-    if "user_code" not in flow:
-        raise Exception("Error iniciando device flow: " + str(flow))
+def _safe_user_key(user_email):
+    user_email = (user_email or "").strip().lower()
+    return user_email or "me"
 
-    print("🔑 Ve a:", flow["verification_uri"])
-    print("🧩 Código:", flow["user_code"])
 
-    result = app.acquire_token_by_device_flow(flow)
+def _safe_token_file(user_email):
+    user_key = _safe_user_key(user_email)
+    if user_key == "me":
+        return "token_onedrive.json"
+    clean = "".join(c if c.isalnum() else "_" for c in user_key)
+    return f"token_onedrive_{clean}.json"
 
-    if "access_token" not in result:
-        print("❌ ERROR token:")
-        print(result)
-        exit()
+
+def _safe_output_file(user_email):
+    user_key = _safe_user_key(user_email)
+    if user_key == "me":
+        return "onedrive_archivos.csv"
+    clean = "".join(c if c.isalnum() else "_" for c in user_key)
+    return f"onedrive_archivos_{clean}.csv"
+
+
+def human_size(num_bytes):
+    if num_bytes is None:
+        return "0 B"
+    num_bytes = int(num_bytes)
+    mb = num_bytes / (1024 * 1024)
+    if mb < 1024:
+        return f"{mb:.2f} MB"
+    gb = mb / 1024
+    return f"{gb:.2f} GB"
+
+
+def find_client_secrets_file():
+    for path in CREDENTIAL_CANDIDATES:
+        if os.path.exists(path):
+            return path
+
+    extra_candidates = sorted(glob("client_secret*.json"))
+    if extra_candidates:
+        return extra_candidates[0]
+
+    return None
+
+
+def get_access_token(user_email=None):
+    token_path = _safe_token_file(user_email)
+
+    cache = msal.SerializableTokenCache()
+    if os.path.exists(token_path):
+        with open(token_path, "r", encoding="utf-8") as f:
+            cache.deserialize(f.read())
+
+    app = msal.PublicClientApplication(
+        CLIENT_ID,
+        authority="https://login.microsoftonline.com/consumers",
+        token_cache=cache,
+    )
+
+    accounts = app.get_accounts()
+    result = None
+    if accounts:
+        result = app.acquire_token_silent(SCOPES, account=accounts[0])
+
+    if not result:
+        flow = app.initiate_device_flow(scopes=SCOPES)
+        if "user_code" not in flow:
+            raise RuntimeError(f"Error iniciando device flow: {flow}")
+
+        print("🔐 Autenticación necesaria para OneDrive:")
+        print(flow.get("message", ""))
+        print("(Ingresa el código, acepta permisos y vuelve a esta ventana.)")
+
+        result = app.acquire_token_by_device_flow(flow)
+        if "access_token" not in result:
+            raise RuntimeError(f"Error obteniendo token OneDrive: {result}")
+
+    if cache.has_state_changed:
+        with open(token_path, "w", encoding="utf-8") as f:
+            f.write(cache.serialize())
 
     return result["access_token"]
 
-# -----------------------------
-# TEST: /me/drive/root
-# -----------------------------
-token = get_token()
 
-print("\n🔍 Probando `/me/drive/root` ...")
+def list_onedrive(user_email=None):
+    output_file = _safe_output_file(user_email)
+    token = get_access_token(user_email)
 
-resp = requests.get(
-    "https://graph.microsoft.com/v1.0/me/drive/root",
-    headers={"Authorization": f"Bearer {token}"}
-)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
 
-print("\nSTATUS:", resp.status_code)
-print("\nRAW RESPONSE:")
-print(resp.text)
+    print("🔍 Descargando lista de archivos de OneDrive...")
 
-try:
-    print("\nJSON FORMATEADO:")
-    print(json.dumps(resp.json(), indent=2))
-except:
-    print("(no JSON válido)")
+    url = "https://graph.microsoft.com/v1.0/me/drive/root/children?$top=200"
+    files = []
+
+    while url:
+        resp = requests.get(url, headers=headers, timeout=30)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Error listando OneDrive: {resp.status_code} {resp.text}")
+
+        data = resp.json()
+        for item in data.get("value", []):
+            if "folder" in item:
+                continue
+            files.append(item)
+
+        url = data.get("@odata.nextLink")
+
+    files_sorted = sorted(files, key=lambda x: int(x.get("size", 0)), reverse=True)
+
+    with open(output_file, "w", encoding="utf-8") as out:
+        for item in files_sorted:
+            size_bytes = int(item.get("size", 0))
+            size_human = human_size(size_bytes)
+            name = item.get("name", "")
+            ext = name.split(".")[-1].lower() if "." in name else "sin_extension"
+            file_id = item.get("id", "")
+            path = item.get("parentReference", {}).get("path", "")
+            full_path = f"/{path.replace('/drive/root:', '').lstrip('/')}/{name}".replace("//", "/")
+
+            out.write(f"{size_bytes};{size_human};{full_path};{ext};{file_id}\n")
+
+    print(f"✅ Archivo generado: {output_file}")
+    return output_file
+
+
+if __name__ == "__main__":
+    list_onedrive()

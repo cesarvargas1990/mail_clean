@@ -19,6 +19,11 @@ def derive_summary_file(input_file):
     if base.startswith("drive_archivos_") and base.endswith(".csv"):
         suffix = base[len("drive_archivos_"):-4]
         return f"resumen_extensiones_{suffix}.txt"
+    if base.startswith("onedrive_archivos_") and base.endswith(".csv"):
+        suffix = base[len("onedrive_archivos_"):-4]
+        return f"resumen_extensiones_onedrive_{suffix}.txt"
+    if base == "onedrive_archivos.csv":
+        return "resumen_extensiones_onedrive.txt"
     return "resumen_extensiones.txt"
 
 

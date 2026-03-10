@@ -11,6 +11,7 @@ from gmail_stats import process as process_gmail
 from outlook_stats import process as process_outlook
 from drive_stats import list_drive
 from drive_stats2 import process_extensions
+from onedrive_stats import list_onedrive
 
 
 class GmailReportApp:
@@ -101,6 +102,17 @@ class GmailReportApp:
         form = ttk.Frame(parent)
         form.pack(fill="x", pady=(0, 6))
 
+        ttk.Label(form, text="Proveedor:").pack(side="left")
+        self.drive_provider_var = tk.StringVar(value="Google Drive")
+        self.drive_provider_combo = ttk.Combobox(
+            form,
+            textvariable=self.drive_provider_var,
+            values=["Google Drive", "OneDrive"],
+            width=13,
+            state="readonly",
+        )
+        self.drive_provider_combo.pack(side="left", padx=(8, 10))
+
         ttk.Label(form, text="Correo Drive:").pack(side="left")
         self.drive_email_var = tk.StringVar()
         self.drive_email_entry = ttk.Entry(form, textvariable=self.drive_email_var, width=38)
@@ -165,6 +177,12 @@ class GmailReportApp:
 
     def get_drive_output_files(self, drive_email):
         safe = self.safe_key(drive_email)
+        provider = self.drive_provider_var.get()
+        if provider == "OneDrive":
+            return [
+                f"onedrive_archivos_{safe}.csv",
+                f"resumen_extensiones_onedrive_{safe}.txt",
+            ]
         return [f"drive_archivos_{safe}.csv", f"resumen_extensiones_{safe}.txt"]
 
     def set_summary(self, summary):
@@ -330,6 +348,7 @@ class GmailReportApp:
 
     def start_drive_report(self):
         drive_email = self.drive_email_var.get().strip()
+        provider = self.drive_provider_var.get()
         if not drive_email:
             messagebox.showwarning(self.REQUIRED_EMAIL_TITLE, "Ingresa el correo para Drive.")
             return
@@ -339,8 +358,8 @@ class GmailReportApp:
         self.drive_log_box.configure(state="disabled")
         self.clear_drive_tabs()
         self.set_drive_running(True)
-        self.append_drive_log(f"▶️ Iniciando análisis de Drive para: {drive_email}")
-        self.drive_worker_thread = threading.Thread(target=self.run_drive_report, args=(drive_email,), daemon=True)
+        self.append_drive_log(f"▶️ Iniciando análisis de {provider} para: {drive_email}")
+        self.drive_worker_thread = threading.Thread(target=self.run_drive_report, args=(drive_email, provider), daemon=True)
         self.drive_worker_thread.start()
 
     def set_drive_running(self, running):
@@ -348,10 +367,12 @@ class GmailReportApp:
             self.drive_run_button.configure(state="disabled")
             self.drive_open_button.configure(state="disabled")
             self.drive_email_entry.configure(state="disabled")
+            self.drive_provider_combo.configure(state="disabled")
         else:
             self.drive_run_button.configure(state="normal")
             self.drive_open_button.configure(state="normal")
             self.drive_email_entry.configure(state="normal")
+            self.drive_provider_combo.configure(state="readonly")
 
     def open_last_drive_report(self):
         drive_email = self.drive_email_var.get().strip()
@@ -366,11 +387,14 @@ class GmailReportApp:
             return
 
         self.render_drive_tabs(files)
-        self.append_drive_log("ℹ️ Se cargaron los últimos archivos de Drive sin reescanear.")
+        self.append_drive_log(f"ℹ️ Se cargaron los últimos archivos de {self.drive_provider_var.get()} sin reescanear.")
 
-    def run_drive_report(self, drive_email):
+    def run_drive_report(self, drive_email, provider):
         try:
-            list_file = list_drive(drive_email)
+            if provider == "OneDrive":
+                list_file = list_onedrive(drive_email)
+            else:
+                list_file = list_drive(drive_email)
             summary_file = process_extensions(input_file=list_file)
             files = [list_file, summary_file]
             self.events.put(("drive_done", {"files": files}))
