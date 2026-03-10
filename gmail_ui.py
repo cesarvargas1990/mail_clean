@@ -14,6 +14,7 @@ from drive_stats2 import process_extensions
 
 class GmailReportApp:
     VERTICAL_NOTEBOOK_STYLE = "Vertical.TNotebook"
+    REQUIRED_EMAIL_TITLE = "Correo requerido"
     DRIVE_LIST_FILE = "drive_archivos.csv"
     DRIVE_SUMMARY_FILE = "resumen_extensiones.txt"
 
@@ -86,6 +87,11 @@ class GmailReportApp:
         form = ttk.Frame(parent)
         form.pack(fill="x", pady=(0, 6))
 
+        ttk.Label(form, text="Correo Drive:").pack(side="left")
+        self.drive_email_var = tk.StringVar()
+        self.drive_email_entry = ttk.Entry(form, textvariable=self.drive_email_var, width=38)
+        self.drive_email_entry.pack(side="left", padx=(8, 10))
+
         self.drive_run_button = ttk.Button(form, text="Generar listado Drive", command=self.start_drive_report)
         self.drive_run_button.pack(side="left")
         self.drive_open_button = ttk.Button(form, text="Abrir último Drive", command=self.open_last_drive_report)
@@ -126,6 +132,17 @@ class GmailReportApp:
     def clear_drive_tabs(self):
         for tab_id in self.drive_notebook.tabs():
             self.drive_notebook.forget(tab_id)
+
+    @staticmethod
+    def safe_key(email):
+        email = (email or "").strip().lower()
+        if not email:
+            return None
+        return "".join(c if c.isalnum() else "_" for c in email)
+
+    def get_drive_output_files(self, drive_email):
+        safe = self.safe_key(drive_email)
+        return [f"drive_archivos_{safe}.csv", f"resumen_extensiones_{safe}.txt"]
 
     def set_summary(self, summary):
         source_tag = None
@@ -289,38 +306,50 @@ class GmailReportApp:
             self.add_text_tab(self.drive_notebook, tab_title, content)
 
     def start_drive_report(self):
+        drive_email = self.drive_email_var.get().strip()
+        if not drive_email:
+            messagebox.showwarning(self.REQUIRED_EMAIL_TITLE, "Ingresa el correo para Drive.")
+            return
+
         self.drive_log_box.configure(state="normal")
         self.drive_log_box.delete("1.0", "end")
         self.drive_log_box.configure(state="disabled")
         self.clear_drive_tabs()
         self.set_drive_running(True)
-        self.append_drive_log("▶️ Iniciando análisis de Drive...")
-        self.drive_worker_thread = threading.Thread(target=self.run_drive_report, daemon=True)
+        self.append_drive_log(f"▶️ Iniciando análisis de Drive para: {drive_email}")
+        self.drive_worker_thread = threading.Thread(target=self.run_drive_report, args=(drive_email,), daemon=True)
         self.drive_worker_thread.start()
 
     def set_drive_running(self, running):
         if running:
             self.drive_run_button.configure(state="disabled")
             self.drive_open_button.configure(state="disabled")
+            self.drive_email_entry.configure(state="disabled")
         else:
             self.drive_run_button.configure(state="normal")
             self.drive_open_button.configure(state="normal")
+            self.drive_email_entry.configure(state="normal")
 
     def open_last_drive_report(self):
-        files = [self.DRIVE_LIST_FILE, self.DRIVE_SUMMARY_FILE]
+        drive_email = self.drive_email_var.get().strip()
+        if not drive_email:
+            messagebox.showwarning(self.REQUIRED_EMAIL_TITLE, "Ingresa el correo para Drive.")
+            return
+
+        files = self.get_drive_output_files(drive_email)
         existing = [path for path in files if os.path.exists(path)]
         if not existing:
-            self.append_drive_log("⚠️ No hay reportes de Drive previos para abrir.")
+            self.append_drive_log(f"⚠️ No hay reportes de Drive previos para {drive_email}.")
             return
 
         self.render_drive_tabs(files)
         self.append_drive_log("ℹ️ Se cargaron los últimos archivos de Drive sin reescanear.")
 
-    def run_drive_report(self):
+    def run_drive_report(self, drive_email):
         try:
-            self.capture_drive_script_output(list_drive)
-            self.capture_drive_script_output(process_extensions)
-            files = [self.DRIVE_LIST_FILE, self.DRIVE_SUMMARY_FILE]
+            list_file = list_drive(drive_email)
+            summary_file = process_extensions(input_file=list_file)
+            files = [list_file, summary_file]
             self.events.put(("drive_done", {"files": files}))
         except Exception as exc:
             self.events.put(("drive_error", str(exc)))
@@ -328,7 +357,7 @@ class GmailReportApp:
     def start_report(self):
         email = self.email_var.get().strip()
         if not email:
-            messagebox.showwarning("Correo requerido", "Ingresa el correo Gmail a procesar.")
+            messagebox.showwarning(self.REQUIRED_EMAIL_TITLE, "Ingresa el correo Gmail a procesar.")
             return
 
         self.log_box.configure(state="normal")

@@ -14,12 +14,21 @@ def human_size(num_bytes):
     return f"{gb:.2f} GB"
 
 
-def process_extensions():
-    input_file = "drive_archivos.csv"
+def derive_summary_file(input_file):
+    base = os.path.basename(input_file)
+    if base.startswith("drive_archivos_") and base.endswith(".csv"):
+        suffix = base[len("drive_archivos_"):-4]
+        return f"resumen_extensiones_{suffix}.txt"
+    return "resumen_extensiones.txt"
+
+
+def process_extensions(input_file="drive_archivos.csv", output_file=None):
+    if output_file is None:
+        output_file = derive_summary_file(input_file)
 
     if not os.path.exists(input_file):
-        print("❌ ERROR: No se encontró drive_archivos.csv")
-        return
+        print(f"❌ ERROR: No se encontró {input_file}")
+        return None
 
     print("🔍 Procesando extensiones…")
 
@@ -48,7 +57,7 @@ def process_extensions():
             ext_size[ext] += size_bytes
 
     # crear archivo final
-    with open("resumen_extensiones.txt", "w", encoding="utf-8") as out:
+    with open(output_file, "w", encoding="utf-8") as out:
         out.write("===== RESUMEN POR EXTENSIÓN =====\n\n")
 
         for ext in sorted(ext_count, key=lambda e: ext_size[e], reverse=True):
@@ -57,7 +66,8 @@ def process_extensions():
 
             out.write(f"{ext} → {count} archivos → {total_size}\n")
 
-    print("✅ Archivo generado: resumen_extensiones.txt")
+            print(f"✅ Archivo generado: {output_file}")
+            return output_file
 
 
 if __name__ == "__main__":

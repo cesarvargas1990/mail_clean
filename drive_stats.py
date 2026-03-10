@@ -22,6 +22,27 @@ def find_client_secrets_file():
     return None
 
 
+def _safe_user_key(user_email):
+    user_email = (user_email or "").strip().lower()
+    return user_email or "me"
+
+
+def _safe_drive_token_file(user_email):
+    user_key = _safe_user_key(user_email)
+    if user_key == "me":
+        return "token_drive.json"
+    clean = "".join(c if c.isalnum() else "_" for c in user_key)
+    return f"token_drive_{clean}.json"
+
+
+def _safe_drive_csv_file(user_email):
+    user_key = _safe_user_key(user_email)
+    if user_key == "me":
+        return "drive_archivos.csv"
+    clean = "".join(c if c.isalnum() else "_" for c in user_key)
+    return f"drive_archivos_{clean}.csv"
+
+
 def human_size(num_bytes):
     """Convierte bytes a MB o GB con 2 decimales."""
     if num_bytes is None:
@@ -37,8 +58,8 @@ def human_size(num_bytes):
     return f"{gb:.2f} GB"
 
 
-def get_service():
-    token_path = "token_drive.json"
+def get_service(user_email=None):
+    token_path = _safe_drive_token_file(user_email)
     creds = None
 
     if os.path.exists(token_path):
@@ -117,8 +138,9 @@ def resolve_path(file, folder_map, cache):
     return full_path
 
 
-def list_drive():
-    service = get_service()
+def list_drive(user_email=None):
+    service = get_service(user_email)
+    output_file = _safe_drive_csv_file(user_email)
 
     print("🔍 Descargando lista de archivos…")
 
@@ -154,7 +176,7 @@ def list_drive():
     )
 
     # exportar con tamaños humanos
-    with open("drive_archivos.csv", "w", encoding="utf-8") as out:
+    with open(output_file, "w", encoding="utf-8") as out:
         for f in files_sorted:
             size_bytes = f.get("size", "0")
             size_human = human_size(size_bytes)
@@ -168,7 +190,8 @@ def list_drive():
                 f"{size_bytes};{size_human};{full_path};{ext};{file_id}\n"
             )
 
-    print("✅ Archivo generado: drive_archivos.csv")
+    print(f"✅ Archivo generado: {output_file}")
+    return output_file
 
 
 if __name__ == "__main__":
