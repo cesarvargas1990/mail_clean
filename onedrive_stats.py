@@ -7,7 +7,7 @@ import msal
 TENANT_ID = "common"
 CLIENT_ID = "537b2720-a1e6-4f38-804f-241ec44f5163"
 SCOPES = [
-    "Files.Read",
+    "Files.ReadWrite",
     "User.Read",
 ]
 CREDENTIAL_CANDIDATES = ["credentials.json", "client_secret.json"]
@@ -145,6 +145,19 @@ def list_onedrive(user_email=None):
 
     print(f"✅ Archivo generado: {output_file}")
     return output_file
+
+
+def delete_onedrive_file(file_id, user_email=None):
+    if not file_id:
+        raise ValueError("Se requiere file_id para eliminar en OneDrive.")
+
+    token = get_access_token(user_email)
+    headers = {"Authorization": f"Bearer {token}"}
+    url = f"https://graph.microsoft.com/v1.0/me/drive/items/{file_id}"
+
+    resp = requests.delete(url, headers=headers, timeout=30)
+    if resp.status_code not in (204,):
+        raise RuntimeError(f"Error eliminando en OneDrive: {resp.status_code} {resp.text}")
 
 
 if __name__ == "__main__":

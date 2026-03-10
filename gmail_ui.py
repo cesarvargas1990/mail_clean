@@ -12,9 +12,9 @@ from tkinter.scrolledtext import ScrolledText
 
 from gmail_stats import process as process_gmail
 from outlook_stats import process as process_outlook
-from drive_stats import list_drive
+from drive_stats import list_drive, delete_drive_file
 from drive_stats2 import process_extensions
-from onedrive_stats import list_onedrive
+from onedrive_stats import list_onedrive, delete_onedrive_file
 
 
 class GmailReportApp:
@@ -309,9 +309,9 @@ class GmailReportApp:
             width = max(90, int(total_width * proportion))
             tree.column(col, width=width)
 
-    def build_link_frame(self, frame):
+    def build_link_frame(self, frame, row=2):
         link_frame = ttk.Frame(frame)
-        link_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        link_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(6, 0))
         link_frame.grid_columnconfigure(0, weight=1)
         link_frame.grid_columnconfigure(1, weight=1)
 
@@ -384,6 +384,15 @@ class GmailReportApp:
         display_rows, original_map_by_index = self.prepare_csv_rows(columns, data_rows)
         column_weights = self.get_column_weights(columns)
 
+        search_frame = ttk.Frame(frame)
+        search_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        search_frame.grid_columnconfigure(1, weight=1)
+
+        ttk.Label(search_frame, text="Buscar:").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(search_frame, textvariable=search_var)
+        search_entry.grid(row=0, column=1, sticky="ew")
+
         tree = ttk.Treeview(frame, columns=columns, show="headings")
         y_scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         x_scroll = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
@@ -398,21 +407,32 @@ class GmailReportApp:
             )
             tree.column(col, width=120, anchor="w", stretch=False)
 
-        for row in display_rows:
-            tree.insert("", "end", values=row)
+        tree.grid(row=1, column=0, sticky="nsew")
+        y_scroll.grid(row=1, column=1, sticky="ns")
+        x_scroll.grid(row=2, column=0, sticky="ew")
 
-        tree.grid(row=0, column=0, sticky="nsew")
-        y_scroll.grid(row=0, column=1, sticky="ns")
-        x_scroll.grid(row=1, column=0, sticky="ew")
+        view_link, download_link = self.build_link_frame(frame, row=3)
 
-        view_link, download_link = self.build_link_frame(frame)
-
-        frame.grid_rowconfigure(0, weight=1)
+        frame.grid_rowconfigure(1, weight=1)
         frame.grid_columnconfigure(0, weight=1)
 
         original_rows_map = {}
-        for idx, item_id in enumerate(tree.get_children()):
-            original_rows_map[item_id] = original_map_by_index.get(idx, {})
+        all_row_data = []
+        for idx, row in enumerate(display_rows):
+            all_row_data.append(
+                {
+                    "display_values": row,
+                    "original_values": original_map_by_index.get(idx, {}),
+                    "search_blob": " ".join(value.lower() for value in row if value),
+                }
+            )
+
+        def persist_rows():
+            with open(csv_path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f, delimiter=";")
+                writer.writerow(columns)
+                for row_info in all_row_data:
+                    writer.writerow([row_info["original_values"].get(col, "") for col in columns])
 
         def fit_columns(_event=None):
             self.fit_tree_columns(tree, frame, columns, column_weights)
@@ -421,23 +441,112 @@ class GmailReportApp:
             self.set_link_widget(view_link, "", "")
             self.set_link_widget(download_link, "", "")
 
-        def on_select(_event=None):
+        def populate_tree(filtered_rows):
+            selected_original = None
+            selected = tree.selection()
+            if selected:
+                selected_original = original_rows_map.get(selected[0], {})
+
+            original_rows_map.clear()
+            for item_id in tree.get_children():
+                tree.delete(item_id)
+
+            new_selection = None
+            for row_info in filtered_rows:
+                item_id = tree.insert("", "end", values=row_info["display_values"])
+                original_rows_map[item_id] = row_info["original_values"]
+                if selected_original and row_info["original_values"] == selected_original:
+                    new_selection = item_id
+
+            if new_selection:
+                tree.selection_set(new_selection)
+                tree.focus(new_selection)
+                tree.see(new_selection)
+            else:
+                clear_link_labels()
+
+            fit_columns()
+
+        def apply_filter(*_args):
+            search_term = search_var.get().strip().lower()
+            if not search_term:
+                filtered_rows = all_row_data
+            else:
+                filtered_rows = [row for row in all_row_data if search_term in row["search_blob"]]
+            populate_tree(filtered_rows)
+
+        def get_selected_row_data():
             selected = tree.selection()
             if not selected:
+                return None
+            return original_rows_map.get(selected[0], {})
+
+        def on_select(_event=None):
+            row_data = get_selected_row_data()
+            if not row_data:
                 clear_link_labels()
                 return
-            row_data = original_rows_map.get(selected[0], {})
             self.set_link_widget(view_link, "🔗 Abrir enlace", row_data.get("view_url", ""))
             self.set_link_widget(download_link, "⬇ Descargar archivo", row_data.get("download_url", ""))
 
-        def open_selected_link(_event=None):
-            selected = tree.selection()
-            if not selected:
-                return
-            row_data = original_rows_map.get(selected[0], {})
-            url = row_data.get("view_url") or row_data.get("download_url")
+        def open_row_url(url):
             if url and url.startswith("http"):
                 webbrowser.open(url)
+
+        def open_selected_link(_event=None):
+            row_data = get_selected_row_data()
+            if not row_data:
+                return
+            open_row_url(row_data.get("view_url") or row_data.get("download_url"))
+
+        def download_selected_file():
+            row_data = get_selected_row_data()
+            if not row_data:
+                return
+            open_row_url(row_data.get("download_url") or row_data.get("view_url"))
+
+        def view_selected_file():
+            row_data = get_selected_row_data()
+            if not row_data:
+                return
+            open_row_url(row_data.get("view_url") or row_data.get("download_url"))
+
+        def delete_selected_file():
+            row_data = get_selected_row_data()
+            if not row_data:
+                return
+
+            full_path = row_data.get("full_path", "(sin ruta)")
+            file_id = row_data.get("file_id", "")
+            if not file_id:
+                messagebox.showerror("Eliminar archivo", "No se encontró el identificador del archivo.")
+                return
+
+            confirmed = messagebox.askyesno(
+                "Eliminar archivo",
+                f"Se eliminará este archivo del proveedor remoto:\n\n{full_path}\n\n¿Deseas continuar?",
+            )
+            if not confirmed:
+                return
+
+            try:
+                provider = self.drive_provider_var.get()
+                drive_email = self.drive_email_var.get().strip() or None
+                if provider == "OneDrive":
+                    delete_onedrive_file(file_id, drive_email)
+                else:
+                    delete_drive_file(file_id, drive_email)
+
+                for idx, row_info in enumerate(all_row_data):
+                    if row_info["original_values"].get("file_id") == file_id:
+                        all_row_data.pop(idx)
+                        break
+
+                persist_rows()
+                apply_filter()
+                self.append_drive_log(f"🗑 Archivo eliminado: {full_path}")
+            except Exception as exc:
+                messagebox.showerror("Eliminar archivo", str(exc))
 
         def update_heading_cursor(event):
             region = tree.identify_region(event.x, event.y)
@@ -446,13 +555,31 @@ class GmailReportApp:
         def reset_cursor(_event=None):
             tree.configure(cursor="")
 
+        context_menu = tk.Menu(tree, tearoff=0)
+        context_menu.add_command(label="Visualizar", command=view_selected_file)
+        context_menu.add_command(label="Descargar", command=download_selected_file)
+        context_menu.add_separator()
+        context_menu.add_command(label="Eliminar", command=delete_selected_file)
+
+        def show_context_menu(event):
+            item_id = tree.identify_row(event.y)
+            if not item_id:
+                return
+            tree.selection_set(item_id)
+            tree.focus(item_id)
+            on_select()
+            context_menu.tk_popup(event.x_root, event.y_root)
+            context_menu.grab_release()
+
         tree.bind("<<TreeviewSelect>>", on_select)
         tree.bind("<Double-1>", open_selected_link)
+        tree.bind("<Button-3>", show_context_menu)
         tree.bind("<Configure>", fit_columns)
         tree.bind("<Motion>", update_heading_cursor)
         tree.bind("<Leave>", reset_cursor)
         frame.bind("<Configure>", fit_columns)
-        fit_columns()
+        search_var.trace_add("write", apply_filter)
+        populate_tree(all_row_data)
 
     def enable_clickable_links(self, text_widget, full_text):
         for idx, match in enumerate(self.URL_PATTERN.finditer(full_text)):

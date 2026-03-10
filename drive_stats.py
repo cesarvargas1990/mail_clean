@@ -6,7 +6,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/drive"]
 CREDENTIAL_CANDIDATES = ["credentials.json", "client_secret.json"]
 
 
@@ -196,6 +196,14 @@ def list_drive(user_email=None):
 
     print(f"✅ Archivo generado: {output_file}")
     return output_file
+
+
+def delete_drive_file(file_id, user_email=None):
+    if not file_id:
+        raise ValueError("Se requiere file_id para eliminar en Drive.")
+
+    service = get_service(user_email)
+    service.files().delete(fileId=file_id).execute()
 
 
 if __name__ == "__main__":
