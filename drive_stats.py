@@ -177,6 +177,8 @@ def list_drive(user_email=None):
 
     # exportar con tamaños humanos
     with open(output_file, "w", encoding="utf-8") as out:
+        out.write("size_bytes;size_human;full_path;ext;file_id;view_url;download_url\n")
+
         for f in files_sorted:
             size_bytes = f.get("size", "0")
             size_human = human_size(size_bytes)
@@ -185,9 +187,11 @@ def list_drive(user_email=None):
             ext = name.split(".")[-1].lower() if "." in name else ""
             file_id = f.get("id", "")
             full_path = f"{f['path']}/{name}"
+            view_url = f"https://drive.google.com/file/d/{file_id}/view"
+            download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
 
             out.write(
-                f"{size_bytes};{size_human};{full_path};{ext};{file_id}\n"
+                f"{size_bytes};{size_human};{full_path};{ext};{file_id};{view_url};{download_url}\n"
             )
 
     print(f"✅ Archivo generado: {output_file}")

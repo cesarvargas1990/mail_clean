@@ -47,7 +47,11 @@ def process_extensions(input_file="drive_archivos.csv", output_file=None):
             if len(parts) < 4:
                 continue
 
-            size_bytes = int(parts[0])
+            try:
+                size_bytes = int(parts[0])
+            except ValueError:
+                continue
+
             file_path = parts[2]
 
             # detectar extension correctamente

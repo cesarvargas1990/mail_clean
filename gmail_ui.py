@@ -2,6 +2,8 @@ import os
 import io
 import queue
 import threading
+import re
+import webbrowser
 from contextlib import redirect_stdout
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -17,6 +19,7 @@ from onedrive_stats import list_onedrive
 class GmailReportApp:
     VERTICAL_NOTEBOOK_STYLE = "Vertical.TNotebook"
     REQUIRED_EMAIL_TITLE = "Correo requerido"
+    URL_PATTERN = re.compile(r"https?://[^\s;]+")
     DRIVE_LIST_FILE = "drive_archivos.csv"
     DRIVE_SUMMARY_FILE = "resumen_extensiones.txt"
 
@@ -239,7 +242,21 @@ class GmailReportApp:
         content = ScrolledText(frame, wrap="none")
         content.pack(fill="both", expand=True)
         content.insert("1.0", text)
+        self.enable_clickable_links(content, text)
         content.configure(state="disabled")
+
+    def enable_clickable_links(self, text_widget, full_text):
+        for idx, match in enumerate(self.URL_PATTERN.finditer(full_text)):
+            start = match.start()
+            end = match.end()
+            start_index = f"1.0+{start}c"
+            end_index = f"1.0+{end}c"
+            tag = f"url_{idx}"
+            url = match.group(0)
+
+            text_widget.tag_add(tag, start_index, end_index)
+            text_widget.tag_config(tag, foreground="#1a73e8", underline=True)
+            text_widget.tag_bind(tag, "<Button-1>", lambda _e, link=url: webbrowser.open(link))
 
     def add_attachment_tabs(self, parent_notebook, title, block_content):
         direction_frame = ttk.Frame(parent_notebook)

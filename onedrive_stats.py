@@ -126,6 +126,8 @@ def list_onedrive(user_email=None):
     files_sorted = sorted(files, key=lambda x: int(x.get("size", 0)), reverse=True)
 
     with open(output_file, "w", encoding="utf-8") as out:
+        out.write("size_bytes;size_human;full_path;ext;file_id;view_url;download_url\n")
+
         for item in files_sorted:
             size_bytes = int(item.get("size", 0))
             size_human = human_size(size_bytes)
@@ -134,8 +136,12 @@ def list_onedrive(user_email=None):
             file_id = item.get("id", "")
             path = item.get("parentReference", {}).get("path", "")
             full_path = f"/{path.replace('/drive/root:', '').lstrip('/')}/{name}".replace("//", "/")
+            view_url = item.get("webUrl", "")
+            download_url = item.get("@microsoft.graph.downloadUrl", "")
 
-            out.write(f"{size_bytes};{size_human};{full_path};{ext};{file_id}\n")
+            out.write(
+                f"{size_bytes};{size_human};{full_path};{ext};{file_id};{view_url};{download_url}\n"
+            )
 
     print(f"✅ Archivo generado: {output_file}")
     return output_file
