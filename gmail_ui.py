@@ -7,7 +7,8 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
 
-from gmail_stats import process
+from gmail_stats import process as process_gmail
+from outlook_stats import process as process_outlook
 from drive_stats import list_drive
 from drive_stats2 import process_extensions
 
@@ -61,10 +62,23 @@ class GmailReportApp:
         form = ttk.Frame(parent)
         form.pack(fill="x", pady=(0, 6))
 
-        ttk.Label(form, text="Correo Gmail:").pack(side="left")
+        ttk.Label(form, text="Proveedor:").pack(side="left")
+        self.mail_provider_var = tk.StringVar(value="Gmail")
+        self.mail_provider_combo = ttk.Combobox(
+            form,
+            textvariable=self.mail_provider_var,
+            values=["Gmail", "Outlook"],
+            width=10,
+            state="readonly",
+        )
+        self.mail_provider_combo.pack(side="left", padx=(8, 10))
+
+        ttk.Label(form, text="Correo:").pack(side="left")
         self.email_var = tk.StringVar()
         self.email_entry = ttk.Entry(form, textvariable=self.email_var, width=48)
         self.email_entry.pack(side="left", padx=(8, 10))
+
+        self.mail_provider_combo.bind("<<ComboboxSelected>>", self.on_provider_change)
 
         self.run_button = ttk.Button(form, text="Generar reporte", command=self.start_report)
         self.run_button.pack(side="left")
@@ -121,9 +135,18 @@ class GmailReportApp:
         if running:
             self.run_button.configure(state="disabled")
             self.email_entry.configure(state="disabled")
+            self.mail_provider_combo.configure(state="disabled")
         else:
             self.run_button.configure(state="normal")
             self.email_entry.configure(state="normal")
+            self.mail_provider_combo.configure(state="readonly")
+
+    def on_provider_change(self, _event=None):
+        provider = self.mail_provider_var.get()
+        if provider == "Outlook":
+            self.append_log("ℹ️ Proveedor seleccionado: Outlook")
+        else:
+            self.append_log("ℹ️ Proveedor seleccionado: Gmail")
 
     def clear_tabs(self):
         for tab_id in self.mail_notebook.tabs():
@@ -356,8 +379,9 @@ class GmailReportApp:
 
     def start_report(self):
         email = self.email_var.get().strip()
+        provider = self.mail_provider_var.get()
         if not email:
-            messagebox.showwarning(self.REQUIRED_EMAIL_TITLE, "Ingresa el correo Gmail a procesar.")
+            messagebox.showwarning(self.REQUIRED_EMAIL_TITLE, f"Ingresa el correo {provider} a procesar.")
             return
 
         self.log_box.configure(state="normal")
@@ -366,18 +390,21 @@ class GmailReportApp:
         self.set_summary(None)
         self.clear_tabs()
 
-        self.append_log(f"▶️ Iniciando análisis para: {email}")
+        self.append_log(f"▶️ Iniciando análisis {provider} para: {email}")
         self.set_running(True)
 
-        self.mail_worker_thread = threading.Thread(target=self.run_report, args=(email,), daemon=True)
+        self.mail_worker_thread = threading.Thread(target=self.run_report, args=(email, provider), daemon=True)
         self.mail_worker_thread.start()
 
-    def run_report(self, email):
+    def run_report(self, email, provider):
         def emit(message):
             self.events.put(("log", message))
 
         try:
-            result = process(user_email=email, log=emit)
+            if provider == "Outlook":
+                result = process_outlook(user_email=email, log=emit)
+            else:
+                result = process_gmail(user_email=email, log=emit)
             self.events.put(("done", result))
         except Exception as exc:
             self.events.put(("error", str(exc)))

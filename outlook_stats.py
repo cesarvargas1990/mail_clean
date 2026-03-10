@@ -1,5 +1,4 @@
 import os
-import json
 import multiprocessing as mp
 from collections import defaultdict
 
@@ -21,8 +20,34 @@ SCOPES = ["https://graph.microsoft.com/Mail.Read"]
 
 # Número de procesos en paralelo
 PROCESSES = 12
+CHUNK_TARGET_SIZE = 300
+HTTP_TIMEOUT_SECONDS = 30
 
 TOKEN_CACHE_FILE = "token_outlook.json"
+CURRENT_TOKEN_CACHE_FILE = TOKEN_CACHE_FILE
+CURRENT_ACCESS_TOKEN = None
+
+
+def _safe_user_key(user_email):
+    user_email = (user_email or "").strip().lower()
+    return user_email or "me"
+
+
+def _safe_token_file(user_email):
+    user_key = _safe_user_key(user_email)
+    if user_key == "me":
+        return "token_outlook.json"
+    clean = "".join(c if c.isalnum() else "_" for c in user_key)
+    return f"token_outlook_{clean}.json"
+
+
+def get_report_files(user_email):
+    user_key = _safe_user_key(user_email)
+    safe = "".join(c if c.isalnum() else "_" for c in user_key)
+    return {
+        "detail": f"detalle_correos_outlook_{safe}.txt",
+        "domain": f"dominios_outlook_{safe}.txt",
+    }
 
 
 # ==== AUTENTICACIÓN / CLIENTE GRAPH ====
@@ -32,8 +57,8 @@ def build_app():
     from msal import SerializableTokenCache
 
     cache = SerializableTokenCache()
-    if os.path.exists(TOKEN_CACHE_FILE):
-        with open(TOKEN_CACHE_FILE, "r") as f:
+    if os.path.exists(CURRENT_TOKEN_CACHE_FILE):
+        with open(CURRENT_TOKEN_CACHE_FILE, "r") as f:
             cache.deserialize(f.read())
 
     app = PublicClientApplication(
@@ -47,11 +72,11 @@ def build_app():
 
 def save_cache(cache):
     if cache.has_state_changed:
-        with open(TOKEN_CACHE_FILE, "w") as f:
+        with open(CURRENT_TOKEN_CACHE_FILE, "w") as f:
             f.write(cache.serialize())
 
 
-def get_access_token():
+def get_access_token(log=print):
     """
     Obtiene un access token reutilizando la cache local.
     Si no hay token válido, usa device code flow (una sola vez).
@@ -64,14 +89,16 @@ def get_access_token():
     if accounts:
         result = app.acquire_token_silent(SCOPES, account=accounts[0])
 
+    logger = log if callable(log) else print
+
     if not result:
         # Device Code flow (similar a OAuth con código en terminal)
         flow = app.initiate_device_flow(scopes=SCOPES)
         if "user_code" not in flow:
             raise RuntimeError("No se pudo iniciar el device flow.")
-        print("\n🔐 Autenticación necesaria para Outlook:")
-        print(flow["message"])
-        print("(Copia/abre la URL que te da Microsoft, pega el código y acepta.)\n")
+        logger("🔐 Autenticación necesaria para Outlook:")
+        logger(flow.get("message", ""))
+        logger("(Ingresa el código, acepta permisos y vuelve a esta ventana.)")
 
         result = app.acquire_token_by_device_flow(flow)
 
@@ -83,12 +110,12 @@ def get_access_token():
     return result["access_token"]
 
 
-def get_service():
+def get_service(access_token=None):
     """
     Igual concepto que en tu script de Gmail:
     devuelve un 'service' que aquí es un requests.Session() con el token puesto.
     """
-    token = get_access_token()
+    token = access_token or get_access_token()
     session = requests.Session()
     session.headers.update({
         "Authorization": f"Bearer {token}",
@@ -109,19 +136,20 @@ def extract_domain(email: str) -> str:
     return "desconocido"
 
 
-def list_all_message_ids(service):
+def list_all_message_ids(service, log=print):
     """
     Lista TODOS los IDs de mensajes usando Microsoft Graph:
     GET /me/messages?$select=id&$top=500 con paginación @odata.nextLink
     """
-    print("🔍 Obteniendo lista de IDs desde Outlook...")
+    logger = log if callable(log) else print
+    logger("🔍 Obteniendo lista de IDs desde Outlook...")
     ids = []
     url = "https://graph.microsoft.com/v1.0/me/messages?$select=id&$top=500"
 
     while url:
-        resp = service.get(url)
+        resp = service.get(url, timeout=HTTP_TIMEOUT_SECONDS)
         if resp.status_code != 200:
-            print("Error al listar mensajes:", resp.status_code, resp.text)
+            logger(f"❌ Error al listar mensajes: {resp.status_code}")
             break
 
         data = resp.json()
@@ -138,7 +166,7 @@ def process_chunk(ids_chunk):
     Procesa un grupo de mensajes en un proceso separado,
     igual que tu script de Gmail.
     """
-    service = get_service()
+    service = get_service(CURRENT_ACCESS_TOKEN)
     from_local = defaultdict(int)
     to_local = defaultdict(int)
 
@@ -149,7 +177,7 @@ def process_chunk(ids_chunk):
                 "https://graph.microsoft.com/v1.0/me/messages/"
                 f"{msg_id}?$select=from,toRecipients"
             )
-            resp = service.get(url)
+            resp = service.get(url, timeout=HTTP_TIMEOUT_SECONDS)
             if resp.status_code != 200:
                 continue
 
@@ -179,31 +207,72 @@ def merge_dicts(a, b):
         a[k] = a.get(k, 0) + v
 
 
+def init_worker(token_cache_file, access_token):
+    global CURRENT_TOKEN_CACHE_FILE, CURRENT_ACCESS_TOKEN
+    CURRENT_TOKEN_CACHE_FILE = token_cache_file
+    CURRENT_ACCESS_TOKEN = access_token
+
+
+def write_counter_block(file_obj, title, with_attachments, without_attachments):
+    file_obj.write(f"===== {title} =====\n")
+    file_obj.write("--- CON ADJUNTOS ---\n")
+    for item, count in sorted(with_attachments.items(), key=lambda x: x[1], reverse=True):
+        file_obj.write(f"{count} → {item}\n")
+
+    file_obj.write("\n--- SIN ADJUNTOS ---\n")
+    for item, count in sorted(without_attachments.items(), key=lambda x: x[1], reverse=True):
+        file_obj.write(f"{count} → {item}\n")
+
+
 # ==== FLUJO PRINCIPAL ====
 
-def process():
-    print("🔐 Preparando autenticación (Outlook / Hotmail)...")
+def process(user_email=None, processes=PROCESSES, log=print):
+    global CURRENT_TOKEN_CACHE_FILE, CURRENT_ACCESS_TOKEN
+    user_id = (user_email or "").strip() or "me"
+    logger = log if callable(log) else print
+    CURRENT_TOKEN_CACHE_FILE = _safe_token_file(user_id)
+    report_files = get_report_files(user_id)
+
+    logger("🔐 Preparando autenticación (Outlook / Hotmail)...")
     # Forzamos obtener token una vez aquí para que luego en los procesos hijos
     # se pueda reutilizar la cache sin mostrar device code varias veces.
-    _ = get_access_token()
+    CURRENT_ACCESS_TOKEN = get_access_token(log=logger)
 
-    service = get_service()
+    service = get_service(CURRENT_ACCESS_TOKEN)
 
-    ids = list_all_message_ids(service)
-    print(f"📬 Total mensajes: {len(ids)}")
+    ids = list_all_message_ids(service, log=logger)
+    logger(f"📬 Total mensajes: {len(ids)}")
 
     if not ids:
-        print("No se encontraron mensajes.")
-        return
+        logger("No se encontraron mensajes.")
+        return {
+            "files": [report_files["detail"], report_files["domain"]],
+            "summary": {
+                "source": "new_scan",
+                "last_scan": None,
+                "detail": {
+                    "received_with_attachments": 0,
+                    "received_without_attachments": 0,
+                    "sent_with_attachments": 0,
+                    "sent_without_attachments": 0,
+                },
+            },
+        }
 
     # Dividir IDs en chunks para multiproceso
-    chunk_size = len(ids) // PROCESSES + 1
+    chunk_size = max(1, CHUNK_TARGET_SIZE)
     chunks = [ids[i:i + chunk_size] for i in range(0, len(ids), chunk_size)]
 
-    print(f"⚡ Procesando en paralelo con {PROCESSES} procesos...")
+    logger(f"⚡ Procesando en paralelo con {processes} procesos ({len(chunks)} bloques)...")
 
-    with mp.Pool(PROCESSES) as pool:
-        results = pool.map(process_chunk, chunks)
+    results = []
+    with mp.Pool(processes, initializer=init_worker, initargs=(CURRENT_TOKEN_CACHE_FILE, CURRENT_ACCESS_TOKEN)) as pool:
+        total_chunks = len(chunks)
+        done_chunks = 0
+        for result in pool.imap_unordered(process_chunk, chunks):
+            results.append(result)
+            done_chunks += 1
+            logger(f"⏳ Avance Outlook: {done_chunks}/{total_chunks} bloques")
 
     from_counter = {}
     to_counter = {}
@@ -213,33 +282,68 @@ def process():
         merge_dicts(to_counter, t)
 
     # ----- Archivo 1: detalle completo -----
-    with open("detalle_correos_outlook.txt", "w", encoding="utf-8") as f:
-        f.write("===== REMITENTES (FROM) =====\n")
-        for sender, count in sorted(from_counter.items(), key=lambda x: x[1], reverse=True):
-            f.write(f"{count} → {sender}\n")
+    with open(report_files["detail"], "w", encoding="utf-8") as f:
+        write_counter_block(
+            f,
+            "REMITENTES (RECIBIDOS)",
+            {},
+            from_counter,
+        )
 
-        f.write("\n\n===== DESTINATARIOS (TO) =====\n")
-        for rec, count in sorted(to_counter.items(), key=lambda x: x[1], reverse=True):
-            f.write(f"{count} → {rec}\n")
+        f.write("\n\n")
 
-    print("📄 Archivo generado: detalle_correos_outlook.txt")
+        write_counter_block(
+            f,
+            "DESTINATARIOS (ENVIADOS)",
+            {},
+            to_counter,
+        )
+
+    logger(f"📄 Archivo generado: {report_files['detail']}")
 
     # ----- Archivo 2: dominios agrupados -----
-    domain_map = defaultdict(int)
+    domain_from_map = defaultdict(int)
+    domain_to_map = defaultdict(int)
 
     for sender, count in from_counter.items():
-        domain_map[extract_domain(sender)] += count
+        domain_from_map[extract_domain(sender)] += count
 
     for rec, count in to_counter.items():
-        domain_map[extract_domain(rec)] += count
+        domain_to_map[extract_domain(rec)] += count
 
-    with open("dominios_outlook.txt", "w", encoding="utf-8") as f:
-        f.write("===== DOMINIOS AGRUPADOS (Outlook) =====\n")
-        for dom, count in sorted(domain_map.items(), key=lambda x: x[1], reverse=True):
-            f.write(f"{count} → {dom}\n")
+    with open(report_files["domain"], "w", encoding="utf-8") as f:
+        write_counter_block(
+            f,
+            "DOMINIOS REMITENTES (RECIBIDOS)",
+            {},
+            domain_from_map,
+        )
 
-    print("📄 Archivo generado: dominios_outlook.txt")
-    print("\n✅ PROCESAMIENTO COMPLETO (OUTLOOK)\n")
+        f.write("\n\n")
+
+        write_counter_block(
+            f,
+            "DOMINIOS DESTINATARIOS (ENVIADOS)",
+            {},
+            domain_to_map,
+        )
+
+    logger(f"📄 Archivo generado: {report_files['domain']}")
+    logger("\n✅ PROCESAMIENTO COMPLETO (OUTLOOK)\n")
+
+    return {
+        "files": [report_files["detail"], report_files["domain"]],
+        "summary": {
+            "source": "new_scan",
+            "last_scan": None,
+            "detail": {
+                "received_with_attachments": 0,
+                "received_without_attachments": sum(from_counter.values()),
+                "sent_with_attachments": 0,
+                "sent_without_attachments": sum(to_counter.values()),
+            },
+        },
+    }
 
 
 if __name__ == "__main__":
