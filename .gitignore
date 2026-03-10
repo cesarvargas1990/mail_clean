@@ -1,5 +1,7 @@
 # Credenciales y tokens sensibles
 credentials.json
+client_secret.json
+data
 *token*.json
 *token*.pickle
 
