@@ -1,11 +1,25 @@
 import os
 import json
+from glob import glob
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 
 SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+CREDENTIAL_CANDIDATES = ["credentials.json", "client_secret.json"]
+
+
+def find_client_secrets_file():
+    for path in CREDENTIAL_CANDIDATES:
+        if os.path.exists(path):
+            return path
+
+    extra_candidates = sorted(glob("client_secret*.json"))
+    if extra_candidates:
+        return extra_candidates[0]
+
+    return None
 
 
 def human_size(num_bytes):
@@ -34,8 +48,15 @@ def get_service():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
+            client_secrets_file = find_client_secrets_file()
+            if not client_secrets_file:
+                raise RuntimeError(
+                    "No se encontró archivo de credenciales OAuth para Drive. "
+                    "Coloca credentials.json o client_secret.json en la carpeta del proyecto."
+                )
+
             flow = InstalledAppFlow.from_client_secrets_file(
-                "credentials.json", SCOPES
+                client_secrets_file, SCOPES
             )
             creds = flow.run_local_server(port=0)
 

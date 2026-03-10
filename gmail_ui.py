@@ -1,19 +1,25 @@
 import os
+import io
 import queue
 import threading
+from contextlib import redirect_stdout
 import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
 
 from gmail_stats import process
+from drive_stats import list_drive
+from drive_stats2 import process_extensions
 
 
 class GmailReportApp:
     VERTICAL_NOTEBOOK_STYLE = "Vertical.TNotebook"
+    DRIVE_LIST_FILE = "drive_archivos.csv"
+    DRIVE_SUMMARY_FILE = "resumen_extensiones.txt"
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Reporte de limpieza Gmail")
+        self.root.title("Reportes de limpieza: Correos y Drive")
         self.root.geometry("980x680")
 
         self.style = ttk.Style(self.root)
@@ -21,7 +27,8 @@ class GmailReportApp:
         self.style.configure(f"{self.VERTICAL_NOTEBOOK_STYLE}.Tab", padding=(10, 6))
 
         self.events = queue.Queue()
-        self.worker_thread = None
+        self.mail_worker_thread = None
+        self.drive_worker_thread = None
 
         main = ttk.Frame(root, padding=8)
         main.pack(fill="both", expand=True)
@@ -29,14 +36,28 @@ class GmailReportApp:
         header = ttk.Label(
             main,
             text=(
-                "Esta herramienta analiza tu Gmail y genera reportes para facilitar\n"
-                "la limpieza manual de correos (recibidos/enviados y con/sin adjuntos)."
+                "Esta herramienta genera reportes para limpieza manual de\n"
+                "correos (Gmail) y archivos en Google Drive."
             ),
             justify="left",
         )
         header.pack(anchor="w", pady=(0, 6))
 
-        form = ttk.Frame(main)
+        self.top_notebook = ttk.Notebook(main)
+        self.top_notebook.pack(fill="both", expand=True)
+
+        self.mail_page = ttk.Frame(self.top_notebook)
+        self.drive_page = ttk.Frame(self.top_notebook)
+        self.top_notebook.add(self.mail_page, text="Correos")
+        self.top_notebook.add(self.drive_page, text="Drive")
+
+        self.build_mail_ui(self.mail_page)
+        self.build_drive_ui(self.drive_page)
+
+        self.root.after(120, self.consume_events)
+
+    def build_mail_ui(self, parent):
+        form = ttk.Frame(parent)
         form.pack(fill="x", pady=(0, 6))
 
         ttk.Label(form, text="Correo Gmail:").pack(side="left")
@@ -47,27 +68,48 @@ class GmailReportApp:
         self.run_button = ttk.Button(form, text="Generar reporte", command=self.start_report)
         self.run_button.pack(side="left")
 
-        ttk.Label(main, text="Estado / progreso:").pack(anchor="w")
-        self.log_box = ScrolledText(main, height=8, wrap="word", state="disabled")
+        ttk.Label(parent, text="Estado / progreso:").pack(anchor="w")
+        self.log_box = ScrolledText(parent, height=8, wrap="word", state="disabled")
         self.log_box.pack(fill="x", pady=(2, 6))
 
-        ttk.Label(main, text="Resumen:").pack(anchor="w")
-        self.summary_box = ScrolledText(main, height=5, wrap="word", state="disabled")
+        ttk.Label(parent, text="Resumen:").pack(anchor="w")
+        self.summary_box = ScrolledText(parent, height=5, wrap="word", state="disabled")
         self.summary_box.pack(fill="x", pady=(2, 6))
         self.summary_box.tag_configure("summary_cached", foreground="#0B7A3E")
         self.summary_box.tag_configure("summary_new", foreground="#0B5394")
 
-        ttk.Label(main, text="Archivos generados:").pack(anchor="w")
-        self.notebook = ttk.Notebook(main, style=self.VERTICAL_NOTEBOOK_STYLE)
-        self.notebook.pack(fill="both", expand=True)
+        ttk.Label(parent, text="Archivos generados:").pack(anchor="w")
+        self.mail_notebook = ttk.Notebook(parent, style=self.VERTICAL_NOTEBOOK_STYLE)
+        self.mail_notebook.pack(fill="both", expand=True)
 
-        self.root.after(120, self.consume_events)
+    def build_drive_ui(self, parent):
+        form = ttk.Frame(parent)
+        form.pack(fill="x", pady=(0, 6))
+
+        self.drive_run_button = ttk.Button(form, text="Generar listado Drive", command=self.start_drive_report)
+        self.drive_run_button.pack(side="left")
+        self.drive_open_button = ttk.Button(form, text="Abrir último Drive", command=self.open_last_drive_report)
+        self.drive_open_button.pack(side="left", padx=(8, 0))
+
+        ttk.Label(parent, text="Estado Drive:").pack(anchor="w")
+        self.drive_log_box = ScrolledText(parent, height=8, wrap="word", state="disabled")
+        self.drive_log_box.pack(fill="x", pady=(2, 6))
+
+        ttk.Label(parent, text="Archivos Drive generados:").pack(anchor="w")
+        self.drive_notebook = ttk.Notebook(parent)
+        self.drive_notebook.pack(fill="both", expand=True)
 
     def append_log(self, message):
         self.log_box.configure(state="normal")
         self.log_box.insert("end", f"{message}\n")
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
+
+    def append_drive_log(self, message):
+        self.drive_log_box.configure(state="normal")
+        self.drive_log_box.insert("end", f"{message}\n")
+        self.drive_log_box.see("end")
+        self.drive_log_box.configure(state="disabled")
 
     def set_running(self, running):
         if running:
@@ -78,8 +120,12 @@ class GmailReportApp:
             self.email_entry.configure(state="normal")
 
     def clear_tabs(self):
-        for tab_id in self.notebook.tabs():
-            self.notebook.forget(tab_id)
+        for tab_id in self.mail_notebook.tabs():
+            self.mail_notebook.forget(tab_id)
+
+    def clear_drive_tabs(self):
+        for tab_id in self.drive_notebook.tabs():
+            self.drive_notebook.forget(tab_id)
 
     def set_summary(self, summary):
         source_tag = None
@@ -166,8 +212,8 @@ class GmailReportApp:
         with open(detalle_path, "r", encoding="utf-8") as f:
             detalle_content = f.read()
 
-        detalle_tab = ttk.Frame(self.notebook)
-        self.notebook.add(detalle_tab, text="Detalle correos")
+        detalle_tab = ttk.Frame(self.mail_notebook)
+        self.mail_notebook.add(detalle_tab, text="Detalle correos")
         detalle_notebook = ttk.Notebook(detalle_tab, style=self.VERTICAL_NOTEBOOK_STYLE)
         detalle_notebook.pack(fill="both", expand=True)
 
@@ -187,8 +233,8 @@ class GmailReportApp:
         with open(dominios_path, "r", encoding="utf-8") as f:
             dominios_content = f.read()
 
-        dominios_tab = ttk.Frame(self.notebook)
-        self.notebook.add(dominios_tab, text="Dominios")
+        dominios_tab = ttk.Frame(self.mail_notebook)
+        self.mail_notebook.add(dominios_tab, text="Dominios")
         dominios_notebook = ttk.Notebook(dominios_tab, style=self.VERTICAL_NOTEBOOK_STYLE)
         dominios_notebook.pack(fill="both", expand=True)
 
@@ -220,6 +266,65 @@ class GmailReportApp:
         else:
             self.append_log("⚠️ No se encontró el archivo esperado de dominios.")
 
+    def capture_drive_script_output(self, func):
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            func()
+        output = buffer.getvalue().strip()
+        if output:
+            for line in output.splitlines():
+                self.events.put(("drive_log", line))
+
+    def render_drive_tabs(self, files):
+        self.clear_drive_tabs()
+        for path in files:
+            if not os.path.exists(path):
+                self.append_drive_log(f"⚠️ No se encontró el archivo esperado: {path}")
+                continue
+
+            tab_title = os.path.basename(path)
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            self.add_text_tab(self.drive_notebook, tab_title, content)
+
+    def start_drive_report(self):
+        self.drive_log_box.configure(state="normal")
+        self.drive_log_box.delete("1.0", "end")
+        self.drive_log_box.configure(state="disabled")
+        self.clear_drive_tabs()
+        self.set_drive_running(True)
+        self.append_drive_log("▶️ Iniciando análisis de Drive...")
+        self.drive_worker_thread = threading.Thread(target=self.run_drive_report, daemon=True)
+        self.drive_worker_thread.start()
+
+    def set_drive_running(self, running):
+        if running:
+            self.drive_run_button.configure(state="disabled")
+            self.drive_open_button.configure(state="disabled")
+        else:
+            self.drive_run_button.configure(state="normal")
+            self.drive_open_button.configure(state="normal")
+
+    def open_last_drive_report(self):
+        files = [self.DRIVE_LIST_FILE, self.DRIVE_SUMMARY_FILE]
+        existing = [path for path in files if os.path.exists(path)]
+        if not existing:
+            self.append_drive_log("⚠️ No hay reportes de Drive previos para abrir.")
+            return
+
+        self.render_drive_tabs(files)
+        self.append_drive_log("ℹ️ Se cargaron los últimos archivos de Drive sin reescanear.")
+
+    def run_drive_report(self):
+        try:
+            self.capture_drive_script_output(list_drive)
+            self.capture_drive_script_output(process_extensions)
+            files = [self.DRIVE_LIST_FILE, self.DRIVE_SUMMARY_FILE]
+            self.events.put(("drive_done", {"files": files}))
+        except Exception as exc:
+            self.events.put(("drive_error", str(exc)))
+
     def start_report(self):
         email = self.email_var.get().strip()
         if not email:
@@ -235,8 +340,8 @@ class GmailReportApp:
         self.append_log(f"▶️ Iniciando análisis para: {email}")
         self.set_running(True)
 
-        self.worker_thread = threading.Thread(target=self.run_report, args=(email,), daemon=True)
-        self.worker_thread.start()
+        self.mail_worker_thread = threading.Thread(target=self.run_report, args=(email,), daemon=True)
+        self.mail_worker_thread.start()
 
     def run_report(self, email):
         def emit(message):
@@ -248,23 +353,49 @@ class GmailReportApp:
         except Exception as exc:
             self.events.put(("error", str(exc)))
 
+    def handle_mail_done_event(self, payload):
+        self.set_running(False)
+        files = payload.get("files", []) if isinstance(payload, dict) else payload
+        summary = payload.get("summary") if isinstance(payload, dict) else None
+        self.build_tabs(files)
+        self.set_summary(summary)
+        self.append_log("✅ Reporte finalizado y cargado en pestañas.")
+
+    def handle_drive_done_event(self, payload):
+        self.set_drive_running(False)
+        files = payload.get("files", []) if isinstance(payload, dict) else payload
+        self.render_drive_tabs(files)
+        self.append_drive_log("✅ Reporte de Drive finalizado y cargado en pestañas.")
+
+    def handle_error_event(self, payload):
+        self.set_running(False)
+        self.append_log("❌ Error durante el procesamiento:")
+        self.append_log(payload)
+
+    def handle_drive_error_event(self, payload):
+        self.set_drive_running(False)
+        self.append_drive_log("❌ Error durante el procesamiento de Drive:")
+        self.append_drive_log(payload)
+
+    def dispatch_event(self, event, payload):
+        if event == "log":
+            self.append_log(payload)
+        elif event == "done":
+            self.handle_mail_done_event(payload)
+        elif event == "drive_log":
+            self.append_drive_log(payload)
+        elif event == "drive_done":
+            self.handle_drive_done_event(payload)
+        elif event == "drive_error":
+            self.handle_drive_error_event(payload)
+        elif event == "error":
+            self.handle_error_event(payload)
+
     def consume_events(self):
         try:
             while True:
                 event, payload = self.events.get_nowait()
-                if event == "log":
-                    self.append_log(payload)
-                elif event == "done":
-                    self.set_running(False)
-                    files = payload.get("files", []) if isinstance(payload, dict) else payload
-                    summary = payload.get("summary") if isinstance(payload, dict) else None
-                    self.build_tabs(files)
-                    self.set_summary(summary)
-                    self.append_log("✅ Reporte finalizado y cargado en pestañas.")
-                elif event == "error":
-                    self.set_running(False)
-                    self.append_log("❌ Error durante el procesamiento:")
-                    self.append_log(payload)
+                self.dispatch_event(event, payload)
         except queue.Empty:
             pass
 
