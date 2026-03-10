@@ -321,6 +321,52 @@ class GmailReportApp:
         download_link.grid(row=0, column=1, sticky="w")
         return view_link, download_link
 
+    @staticmethod
+    def format_column_title(column_name):
+        return " ".join(part.capitalize() for part in column_name.split("_"))
+
+    @staticmethod
+    def infer_numeric_column(tree, column, original_rows_map):
+        for item_id in tree.get_children():
+            raw = original_rows_map.get(item_id, {}).get(column, "")
+            if raw in (None, ""):
+                continue
+            try:
+                float(raw)
+            except ValueError:
+                return False
+        return True
+
+    @staticmethod
+    def _sort_key(value, numeric):
+        if value in (None, ""):
+            return float("-inf") if numeric else ""
+        if numeric:
+            try:
+                return float(value)
+            except ValueError:
+                return float("-inf")
+        return str(value).lower()
+
+    def sort_tree_column(self, tree, column, reverse, original_rows_map):
+        numeric = self.infer_numeric_column(tree, column, original_rows_map)
+        items = list(tree.get_children())
+        items.sort(
+            key=lambda item_id: self._sort_key(original_rows_map.get(item_id, {}).get(column, ""), numeric),
+            reverse=reverse,
+        )
+
+        for index, item_id in enumerate(items):
+            tree.move(item_id, "", index)
+
+        title = self.format_column_title(column)
+        marker = "↓" if reverse else "↑"
+        tree.heading(
+            column,
+            text=f"{title} {marker}",
+            command=lambda c=column, r=(not reverse): self.sort_tree_column(tree, c, r, original_rows_map),
+        )
+
     def add_csv_grid_tab(self, parent_notebook, title, csv_path):
         frame = ttk.Frame(parent_notebook)
         parent_notebook.add(frame, text=title)
@@ -344,7 +390,12 @@ class GmailReportApp:
         tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
 
         for col in columns:
-            tree.heading(col, text=col)
+            display_title = self.format_column_title(col)
+            tree.heading(
+                col,
+                text=display_title,
+                command=lambda c=col: self.sort_tree_column(tree, c, False, original_rows_map),
+            )
             tree.column(col, width=120, anchor="w", stretch=False)
 
         for row in display_rows:
@@ -388,9 +439,18 @@ class GmailReportApp:
             if url and url.startswith("http"):
                 webbrowser.open(url)
 
+        def update_heading_cursor(event):
+            region = tree.identify_region(event.x, event.y)
+            tree.configure(cursor="hand2" if region == "heading" else "")
+
+        def reset_cursor(_event=None):
+            tree.configure(cursor="")
+
         tree.bind("<<TreeviewSelect>>", on_select)
         tree.bind("<Double-1>", open_selected_link)
         tree.bind("<Configure>", fit_columns)
+        tree.bind("<Motion>", update_heading_cursor)
+        tree.bind("<Leave>", reset_cursor)
         frame.bind("<Configure>", fit_columns)
         fit_columns()
 

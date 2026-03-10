@@ -184,7 +184,7 @@ def list_drive(user_email=None):
             size_human = human_size(size_bytes)
 
             name = f.get("name", "")
-            ext = name.split(".")[-1].lower() if "." in name else ""
+            ext = name.split(".")[-1].lower() if "." in name else "sin_extension"
             file_id = f.get("id", "")
             full_path = f"{f['path']}/{name}"
             view_url = f"https://drive.google.com/file/d/{file_id}/view"

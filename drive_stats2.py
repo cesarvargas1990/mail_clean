@@ -52,14 +52,8 @@ def process_extensions(input_file="drive_archivos.csv", output_file=None):
             except ValueError:
                 continue
 
-            file_path = parts[2]
-
-            # detectar extension correctamente
-            file_name = file_path.split("/")[-1]
-
-            if "." in file_name:
-                ext = file_name.split(".")[-1].lower()
-            else:
+            ext = (parts[3] or "").strip().lower()
+            if not ext:
                 ext = "sin_extension"
 
             ext_count[ext] += 1
@@ -75,8 +69,8 @@ def process_extensions(input_file="drive_archivos.csv", output_file=None):
 
             out.write(f"{ext} → {count} archivos → {total_size}\n")
 
-            print(f"✅ Archivo generado: {output_file}")
-            return output_file
+    print(f"✅ Archivo generado: {output_file}")
+    return output_file
 
 
 if __name__ == "__main__":
