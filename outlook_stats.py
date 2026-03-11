@@ -1,5 +1,5 @@
 import os
-import multiprocessing as mp
+import time
 from collections import defaultdict
 
 import requests
@@ -18,10 +18,13 @@ AUTHORITY = "https://login.microsoftonline.com/consumers"
 # Permiso de solo lectura de correo
 SCOPES = ["https://graph.microsoft.com/Mail.Read"]
 
-# Número de procesos en paralelo
+# Número de procesos en paralelo (ya no se usa en Outlook optimizado,
+# se mantiene para compatibilidad con llamadas previas)
 PROCESSES = 12
-CHUNK_TARGET_SIZE = 300
 HTTP_TIMEOUT_SECONDS = 30
+PAGE_SIZE = 500
+REQUEST_RETRIES = 6
+RETRY_BASE_SECONDS = 2
 
 TOKEN_CACHE_FILE = "token_outlook.json"
 CURRENT_TOKEN_CACHE_FILE = TOKEN_CACHE_FILE
@@ -120,6 +123,7 @@ def get_service(access_token=None):
     session.headers.update({
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
+        "Prefer": f"odata.maxpagesize={PAGE_SIZE}",
     })
     return session
 
@@ -136,81 +140,112 @@ def extract_domain(email: str) -> str:
     return "desconocido"
 
 
-def list_all_message_ids(service, log=print):
-    """
-    Lista TODOS los IDs de mensajes usando Microsoft Graph:
-    GET /me/messages?$select=id&$top=500 con paginación @odata.nextLink
-    """
+def update_counters_from_message(
+    msg,
+    from_with_attachments,
+    from_without_attachments,
+    to_with_attachments,
+    to_without_attachments,
+):
+    has_attachments = bool(msg.get("hasAttachments", False))
+
+    from_obj = msg.get("from", {}).get("emailAddress", {})
+    from_addr = from_obj.get("address")
+    if from_addr:
+        if has_attachments:
+            from_with_attachments[from_addr] += 1
+        else:
+            from_without_attachments[from_addr] += 1
+
+    for rec in msg.get("toRecipients", []):
+        addr = rec.get("emailAddress", {}).get("address")
+        if addr:
+            if has_attachments:
+                to_with_attachments[addr] += 1
+            else:
+                to_without_attachments[addr] += 1
+
+
+def should_retry_status(status_code):
+    return status_code in (429, 500, 502, 503, 504)
+
+
+def fetch_with_retry(service, url, logger, context):
+    last_error = None
+
+    for attempt in range(1, REQUEST_RETRIES + 1):
+        try:
+            resp = service.get(url, timeout=HTTP_TIMEOUT_SECONDS)
+
+            if should_retry_status(resp.status_code):
+                retry_after = resp.headers.get("Retry-After")
+                if retry_after and retry_after.isdigit():
+                    wait_seconds = int(retry_after)
+                else:
+                    wait_seconds = RETRY_BASE_SECONDS * attempt
+                logger(f"⚠️ {context}: HTTP {resp.status_code}. Reintento {attempt}/{REQUEST_RETRIES} en {wait_seconds}s...")
+                time.sleep(wait_seconds)
+                continue
+
+            if resp.status_code != 200:
+                raise RuntimeError(f"{context}: HTTP {resp.status_code} - {resp.text[:250]}")
+
+            return resp
+
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+            last_error = exc
+            wait_seconds = RETRY_BASE_SECONDS * attempt
+            logger(f"⚠️ {context}: timeout/conexión. Reintento {attempt}/{REQUEST_RETRIES} en {wait_seconds}s...")
+            time.sleep(wait_seconds)
+
+    if last_error:
+        raise RuntimeError(f"{context}: fallo de red tras {REQUEST_RETRIES} reintentos ({last_error})")
+    raise RuntimeError(f"{context}: no se pudo completar la petición tras reintentos")
+
+
+def count_messages_paged(service, log=print):
+    """Cuenta FROM/TO directamente desde la lista paginada de mensajes."""
     logger = log if callable(log) else print
-    logger("🔍 Obteniendo lista de IDs desde Outlook...")
-    ids = []
-    url = "https://graph.microsoft.com/v1.0/me/messages?$select=id&$top=500"
+    logger("🔍 Obteniendo y procesando mensajes desde Outlook...")
+
+    from_with_attachments = defaultdict(int)
+    from_without_attachments = defaultdict(int)
+    to_with_attachments = defaultdict(int)
+    to_without_attachments = defaultdict(int)
+    total_messages = 0
+    page_count = 0
+
+    url = f"https://graph.microsoft.com/v1.0/me/messages?$select=from,toRecipients,hasAttachments&$top={PAGE_SIZE}"
 
     while url:
-        resp = service.get(url, timeout=HTTP_TIMEOUT_SECONDS)
-        if resp.status_code != 200:
-            logger(f"❌ Error al listar mensajes: {resp.status_code}")
-            break
+        resp = fetch_with_retry(service, url, logger, "Listado de mensajes Outlook")
 
         data = resp.json()
-        for m in data.get("value", []):
-            ids.append(m["id"])
+        batch = data.get("value", [])
+        page_count += 1
+
+        for msg in batch:
+            total_messages += 1
+            update_counters_from_message(
+                msg,
+                from_with_attachments,
+                from_without_attachments,
+                to_with_attachments,
+                to_without_attachments,
+            )
+
+        if page_count % 10 == 0:
+            logger(f"⏳ Avance Outlook: {total_messages} mensajes procesados...")
 
         url = data.get("@odata.nextLink")
 
-    return ids
-
-
-def process_chunk(ids_chunk):
-    """
-    Procesa un grupo de mensajes en un proceso separado,
-    igual que tu script de Gmail.
-    """
-    service = get_service(CURRENT_ACCESS_TOKEN)
-    from_local = defaultdict(int)
-    to_local = defaultdict(int)
-
-    for msg_id in ids_chunk:
-        try:
-            # Solo necesitamos remitente y destinatarios
-            url = (
-                "https://graph.microsoft.com/v1.0/me/messages/"
-                f"{msg_id}?$select=from,toRecipients"
-            )
-            resp = service.get(url, timeout=HTTP_TIMEOUT_SECONDS)
-            if resp.status_code != 200:
-                continue
-
-            msg = resp.json()
-
-            # From
-            from_obj = msg.get("from", {}).get("emailAddress", {})
-            from_addr = from_obj.get("address")
-            if from_addr:
-                from_local[from_addr] += 1
-
-            # To (lista)
-            for rec in msg.get("toRecipients", []):
-                addr = rec.get("emailAddress", {}).get("address")
-                if addr:
-                    to_local[addr] += 1
-
-        except Exception:
-            # No rompemos el proceso por un correo raro
-            continue
-
-    return dict(from_local), dict(to_local)
-
-
-def merge_dicts(a, b):
-    for k, v in b.items():
-        a[k] = a.get(k, 0) + v
-
-
-def init_worker(token_cache_file, access_token):
-    global CURRENT_TOKEN_CACHE_FILE, CURRENT_ACCESS_TOKEN
-    CURRENT_TOKEN_CACHE_FILE = token_cache_file
-    CURRENT_ACCESS_TOKEN = access_token
+    return (
+        dict(from_with_attachments),
+        dict(from_without_attachments),
+        dict(to_with_attachments),
+        dict(to_without_attachments),
+        total_messages,
+    )
 
 
 def write_counter_block(file_obj, title, with_attachments, without_attachments):
@@ -234,16 +269,37 @@ def process(user_email=None, processes=PROCESSES, log=print):
     report_files = get_report_files(user_id)
 
     logger("🔐 Preparando autenticación (Outlook / Hotmail)...")
+    logger(f"⚙️ Modo optimizado activo (parámetro procesos={processes}).")
     # Forzamos obtener token una vez aquí para que luego en los procesos hijos
     # se pueda reutilizar la cache sin mostrar device code varias veces.
     CURRENT_ACCESS_TOKEN = get_access_token(log=logger)
 
     service = get_service(CURRENT_ACCESS_TOKEN)
 
-    ids = list_all_message_ids(service, log=logger)
-    logger(f"📬 Total mensajes: {len(ids)}")
+    (
+        from_with_attachments,
+        from_without_attachments,
+        to_with_attachments,
+        to_without_attachments,
+        total_messages,
+    ) = count_messages_paged(service, log=logger)
 
-    if not ids:
+    from_counter = defaultdict(int)
+    to_counter = defaultdict(int)
+
+    for sender, count in from_with_attachments.items():
+        from_counter[sender] += count
+    for sender, count in from_without_attachments.items():
+        from_counter[sender] += count
+
+    for rec, count in to_with_attachments.items():
+        to_counter[rec] += count
+    for rec, count in to_without_attachments.items():
+        to_counter[rec] += count
+
+    logger(f"📬 Total mensajes: {total_messages}")
+
+    if not total_messages:
         logger("No se encontraron mensajes.")
         return {
             "files": [report_files["detail"], report_files["domain"]],
@@ -259,35 +315,15 @@ def process(user_email=None, processes=PROCESSES, log=print):
             },
         }
 
-    # Dividir IDs en chunks para multiproceso
-    chunk_size = max(1, CHUNK_TARGET_SIZE)
-    chunks = [ids[i:i + chunk_size] for i in range(0, len(ids), chunk_size)]
-
-    logger(f"⚡ Procesando en paralelo con {processes} procesos ({len(chunks)} bloques)...")
-
-    results = []
-    with mp.Pool(processes, initializer=init_worker, initargs=(CURRENT_TOKEN_CACHE_FILE, CURRENT_ACCESS_TOKEN)) as pool:
-        total_chunks = len(chunks)
-        done_chunks = 0
-        for result in pool.imap_unordered(process_chunk, chunks):
-            results.append(result)
-            done_chunks += 1
-            logger(f"⏳ Avance Outlook: {done_chunks}/{total_chunks} bloques")
-
-    from_counter = {}
-    to_counter = {}
-
-    for f, t in results:
-        merge_dicts(from_counter, f)
-        merge_dicts(to_counter, t)
+    logger("⚡ Procesamiento Outlook optimizado completado.")
 
     # ----- Archivo 1: detalle completo -----
     with open(report_files["detail"], "w", encoding="utf-8") as f:
         write_counter_block(
             f,
             "REMITENTES (RECIBIDOS)",
-            {},
-            from_counter,
+            from_with_attachments,
+            from_without_attachments,
         )
 
         f.write("\n\n")
@@ -295,28 +331,36 @@ def process(user_email=None, processes=PROCESSES, log=print):
         write_counter_block(
             f,
             "DESTINATARIOS (ENVIADOS)",
-            {},
-            to_counter,
+            to_with_attachments,
+            to_without_attachments,
         )
 
     logger(f"📄 Archivo generado: {report_files['detail']}")
 
     # ----- Archivo 2: dominios agrupados -----
-    domain_from_map = defaultdict(int)
-    domain_to_map = defaultdict(int)
+    domain_from_with_attachments = defaultdict(int)
+    domain_from_without_attachments = defaultdict(int)
+    domain_to_with_attachments = defaultdict(int)
+    domain_to_without_attachments = defaultdict(int)
 
-    for sender, count in from_counter.items():
-        domain_from_map[extract_domain(sender)] += count
+    for sender, count in from_with_attachments.items():
+        domain_from_with_attachments[extract_domain(sender)] += count
 
-    for rec, count in to_counter.items():
-        domain_to_map[extract_domain(rec)] += count
+    for sender, count in from_without_attachments.items():
+        domain_from_without_attachments[extract_domain(sender)] += count
+
+    for rec, count in to_with_attachments.items():
+        domain_to_with_attachments[extract_domain(rec)] += count
+
+    for rec, count in to_without_attachments.items():
+        domain_to_without_attachments[extract_domain(rec)] += count
 
     with open(report_files["domain"], "w", encoding="utf-8") as f:
         write_counter_block(
             f,
             "DOMINIOS REMITENTES (RECIBIDOS)",
-            {},
-            domain_from_map,
+            domain_from_with_attachments,
+            domain_from_without_attachments,
         )
 
         f.write("\n\n")
@@ -324,8 +368,8 @@ def process(user_email=None, processes=PROCESSES, log=print):
         write_counter_block(
             f,
             "DOMINIOS DESTINATARIOS (ENVIADOS)",
-            {},
-            domain_to_map,
+            domain_to_with_attachments,
+            domain_to_without_attachments,
         )
 
     logger(f"📄 Archivo generado: {report_files['domain']}")
@@ -337,10 +381,10 @@ def process(user_email=None, processes=PROCESSES, log=print):
             "source": "new_scan",
             "last_scan": None,
             "detail": {
-                "received_with_attachments": 0,
-                "received_without_attachments": sum(from_counter.values()),
-                "sent_with_attachments": 0,
-                "sent_without_attachments": sum(to_counter.values()),
+                "received_with_attachments": sum(from_with_attachments.values()),
+                "received_without_attachments": sum(from_without_attachments.values()),
+                "sent_with_attachments": sum(to_with_attachments.values()),
+                "sent_without_attachments": sum(to_without_attachments.values()),
             },
         },
     }

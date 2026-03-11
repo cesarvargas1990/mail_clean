@@ -57,7 +57,7 @@ def find_client_secrets_file():
     return None
 
 
-def get_access_token(user_email=None):
+def get_access_token(user_email=None, log=print):
     token_path = _safe_token_file(user_email)
 
     cache = msal.SerializableTokenCache()
@@ -81,9 +81,9 @@ def get_access_token(user_email=None):
         if "user_code" not in flow:
             raise RuntimeError(f"Error iniciando device flow: {flow}")
 
-        print("🔐 Autenticación necesaria para OneDrive:")
-        print(flow.get("message", ""))
-        print("(Ingresa el código, acepta permisos y vuelve a esta ventana.)")
+        log("🔐 Autenticación necesaria para OneDrive:")
+        log(flow.get("message", ""))
+        log("(Ingresa el código, acepta permisos y vuelve a esta ventana.)")
 
         result = app.acquire_token_by_device_flow(flow)
         if "access_token" not in result:
@@ -96,16 +96,16 @@ def get_access_token(user_email=None):
     return result["access_token"]
 
 
-def list_onedrive(user_email=None):
+def list_onedrive(user_email=None, log=print):
     output_file = _safe_output_file(user_email)
-    token = get_access_token(user_email)
+    token = get_access_token(user_email, log=log)
 
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
     }
 
-    print("🔍 Descargando lista de archivos de OneDrive...")
+    log("🔍 Descargando lista de archivos de OneDrive...")
 
     url = "https://graph.microsoft.com/v1.0/me/drive/root/children?$top=200"
     files = []
@@ -143,7 +143,7 @@ def list_onedrive(user_email=None):
                 f"{size_bytes};{size_human};{full_path};{ext};{file_id};{view_url};{download_url}\n"
             )
 
-    print(f"✅ Archivo generado: {output_file}")
+    log(f"✅ Archivo generado: {output_file}")
     return output_file
 
 

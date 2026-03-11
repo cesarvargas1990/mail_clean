@@ -6,8 +6,9 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 
-SCOPES = ["https://www.googleapis.com/auth/drive"]
+SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 CREDENTIAL_CANDIDATES = ["credentials.json", "client_secret.json"]
+DEFAULT_DRIVE_TOKEN_FILE = "token_drive.json"
 
 
 def find_client_secrets_file():
@@ -30,7 +31,7 @@ def _safe_user_key(user_email):
 def _safe_drive_token_file(user_email):
     user_key = _safe_user_key(user_email)
     if user_key == "me":
-        return "token_drive.json"
+        return DEFAULT_DRIVE_TOKEN_FILE
     clean = "".join(c if c.isalnum() else "_" for c in user_key)
     return f"token_drive_{clean}.json"
 
@@ -58,28 +59,46 @@ def human_size(num_bytes):
     return f"{gb:.2f} GB"
 
 
+def load_drive_credentials(token_path):
+    if os.path.exists(token_path):
+        return Credentials.from_authorized_user_file(token_path, SCOPES)
+
+    if token_path != DEFAULT_DRIVE_TOKEN_FILE and os.path.exists(DEFAULT_DRIVE_TOKEN_FILE):
+        return Credentials.from_authorized_user_file(DEFAULT_DRIVE_TOKEN_FILE, SCOPES)
+
+    return None
+
+
+def run_oauth_flow():
+    client_secrets_file = find_client_secrets_file()
+    if not client_secrets_file:
+        raise RuntimeError(
+            "No se encontró archivo de credenciales OAuth para Drive. "
+            "Coloca credentials.json o client_secret.json en la carpeta del proyecto."
+        )
+
+    flow = InstalledAppFlow.from_client_secrets_file(client_secrets_file, SCOPES)
+    try:
+        return flow.run_local_server(port=0)
+    except Exception as exc:
+        if "invalid_scope" in str(exc).lower():
+            raise RuntimeError(
+                "Google devolvió invalid_scope para Drive. "
+                "Verifica que Drive API esté habilitada en tu proyecto de Google Cloud "
+                "y vuelve a autorizar."
+            ) from exc
+        raise
+
+
 def get_service(user_email=None):
     token_path = _safe_drive_token_file(user_email)
-    creds = None
-
-    if os.path.exists(token_path):
-        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+    creds = load_drive_credentials(token_path)
 
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            client_secrets_file = find_client_secrets_file()
-            if not client_secrets_file:
-                raise RuntimeError(
-                    "No se encontró archivo de credenciales OAuth para Drive. "
-                    "Coloca credentials.json o client_secret.json en la carpeta del proyecto."
-                )
-
-            flow = InstalledAppFlow.from_client_secrets_file(
-                client_secrets_file, SCOPES
-            )
-            creds = flow.run_local_server(port=0)
+            creds = run_oauth_flow()
 
         with open(token_path, "w") as f:
             f.write(creds.to_json())

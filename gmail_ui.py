@@ -749,8 +749,11 @@ class GmailReportApp:
 
     def run_drive_report(self, drive_email, provider):
         try:
+            def emit_drive(message):
+                self.events.put(("drive_log", message))
+
             if provider == "OneDrive":
-                list_file = list_onedrive(drive_email)
+                list_file = list_onedrive(drive_email, log=emit_drive)
             else:
                 list_file = list_drive(drive_email)
             summary_file = process_extensions(input_file=list_file)
