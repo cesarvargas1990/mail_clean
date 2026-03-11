@@ -1,5 +1,6 @@
 import os
 import time
+import webbrowser
 from collections import defaultdict
 
 import requests
@@ -29,6 +30,7 @@ RETRY_BASE_SECONDS = 2
 TOKEN_CACHE_FILE = "token_outlook.json"
 CURRENT_TOKEN_CACHE_FILE = TOKEN_CACHE_FILE
 CURRENT_ACCESS_TOKEN = None
+CANCEL_MESSAGE = "Operación cancelada por el usuario."
 
 
 def _safe_user_key(user_email):
@@ -79,7 +81,21 @@ def save_cache(cache):
             f.write(cache.serialize())
 
 
-def get_access_token(log=print):
+def ensure_not_cancelled(stop_event=None):
+    if stop_event is not None and stop_event.is_set():
+        raise RuntimeError(CANCEL_MESSAGE)
+
+
+def open_auth_url(url, log=print):
+    try:
+        webbrowser.open(url)
+        logger = log if callable(log) else print
+        logger(f"🌐 Abriendo navegador: {url}")
+    except Exception:
+        pass
+
+
+def get_access_token(log=print, stop_event=None):
     """
     Obtiene un access token reutilizando la cache local.
     Si no hay token válido, usa device code flow (una sola vez).
@@ -93,6 +109,7 @@ def get_access_token(log=print):
         result = app.acquire_token_silent(SCOPES, account=accounts[0])
 
     logger = log if callable(log) else print
+    ensure_not_cancelled(stop_event)
 
     if not result:
         # Device Code flow (similar a OAuth con código en terminal)
@@ -102,6 +119,8 @@ def get_access_token(log=print):
         logger("🔐 Autenticación necesaria para Outlook:")
         logger(flow.get("message", ""))
         logger("(Ingresa el código, acepta permisos y vuelve a esta ventana.)")
+        open_auth_url("https://www.microsoft.com/link", log=logger)
+        ensure_not_cancelled(stop_event)
 
         result = app.acquire_token_by_device_flow(flow)
 
@@ -170,10 +189,11 @@ def should_retry_status(status_code):
     return status_code in (429, 500, 502, 503, 504)
 
 
-def fetch_with_retry(service, url, logger, context):
+def fetch_with_retry(service, url, logger, context, stop_event=None):
     last_error = None
 
     for attempt in range(1, REQUEST_RETRIES + 1):
+        ensure_not_cancelled(stop_event)
         try:
             resp = service.get(url, timeout=HTTP_TIMEOUT_SECONDS)
 
@@ -184,7 +204,9 @@ def fetch_with_retry(service, url, logger, context):
                 else:
                     wait_seconds = RETRY_BASE_SECONDS * attempt
                 logger(f"⚠️ {context}: HTTP {resp.status_code}. Reintento {attempt}/{REQUEST_RETRIES} en {wait_seconds}s...")
-                time.sleep(wait_seconds)
+                for _ in range(wait_seconds * 10):
+                    ensure_not_cancelled(stop_event)
+                    time.sleep(0.1)
                 continue
 
             if resp.status_code != 200:
@@ -196,14 +218,16 @@ def fetch_with_retry(service, url, logger, context):
             last_error = exc
             wait_seconds = RETRY_BASE_SECONDS * attempt
             logger(f"⚠️ {context}: timeout/conexión. Reintento {attempt}/{REQUEST_RETRIES} en {wait_seconds}s...")
-            time.sleep(wait_seconds)
+            for _ in range(wait_seconds * 10):
+                ensure_not_cancelled(stop_event)
+                time.sleep(0.1)
 
     if last_error:
         raise RuntimeError(f"{context}: fallo de red tras {REQUEST_RETRIES} reintentos ({last_error})")
     raise RuntimeError(f"{context}: no se pudo completar la petición tras reintentos")
 
 
-def count_messages_paged(service, log=print):
+def count_messages_paged(service, log=print, stop_event=None):
     """Cuenta FROM/TO directamente desde la lista paginada de mensajes."""
     logger = log if callable(log) else print
     logger("🔍 Obteniendo y procesando mensajes desde Outlook...")
@@ -218,7 +242,8 @@ def count_messages_paged(service, log=print):
     url = f"https://graph.microsoft.com/v1.0/me/messages?$select=from,toRecipients,hasAttachments&$top={PAGE_SIZE}"
 
     while url:
-        resp = fetch_with_retry(service, url, logger, "Listado de mensajes Outlook")
+        ensure_not_cancelled(stop_event)
+        resp = fetch_with_retry(service, url, logger, "Listado de mensajes Outlook", stop_event=stop_event)
 
         data = resp.json()
         batch = data.get("value", [])
@@ -261,7 +286,7 @@ def write_counter_block(file_obj, title, with_attachments, without_attachments):
 
 # ==== FLUJO PRINCIPAL ====
 
-def process(user_email=None, processes=PROCESSES, log=print):
+def process(user_email=None, processes=PROCESSES, log=print, stop_event=None):
     global CURRENT_TOKEN_CACHE_FILE, CURRENT_ACCESS_TOKEN
     user_id = (user_email or "").strip() or "me"
     logger = log if callable(log) else print
@@ -272,7 +297,7 @@ def process(user_email=None, processes=PROCESSES, log=print):
     logger(f"⚙️ Modo optimizado activo (parámetro procesos={processes}).")
     # Forzamos obtener token una vez aquí para que luego en los procesos hijos
     # se pueda reutilizar la cache sin mostrar device code varias veces.
-    CURRENT_ACCESS_TOKEN = get_access_token(log=logger)
+    CURRENT_ACCESS_TOKEN = get_access_token(log=logger, stop_event=stop_event)
 
     service = get_service(CURRENT_ACCESS_TOKEN)
 
@@ -282,7 +307,7 @@ def process(user_email=None, processes=PROCESSES, log=print):
         to_with_attachments,
         to_without_attachments,
         total_messages,
-    ) = count_messages_paged(service, log=logger)
+    ) = count_messages_paged(service, log=logger, stop_event=stop_event)
 
     from_counter = defaultdict(int)
     to_counter = defaultdict(int)

@@ -4,7 +4,9 @@ import queue
 import threading
 import csv
 import re
+import json
 import webbrowser
+from glob import glob
 from contextlib import redirect_stdout
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -23,9 +25,13 @@ class GmailReportApp:
     EVT_CLICK = "<Button-1>"
     EVT_ENTER = "<Enter>"
     EVT_LEAVE = "<Leave>"
+    EVT_COMBO_SELECTED = "<<ComboboxSelected>>"
     URL_PATTERN = re.compile(r"https?://[^\s;]+")
     DRIVE_LIST_FILE = "drive_archivos.csv"
     DRIVE_SUMMARY_FILE = "resumen_extensiones.txt"
+    GMAIL_SCAN_STATE_FILE = "gmail_scan_state.json"
+    EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+    CANCEL_MESSAGE = "Operación cancelada por el usuario."
 
     def __init__(self, root):
         self.root = root
@@ -39,6 +45,9 @@ class GmailReportApp:
         self.events = queue.Queue()
         self.mail_worker_thread = None
         self.drive_worker_thread = None
+        self.mail_stop_event = threading.Event()
+        self.drive_stop_event = threading.Event()
+        self.link_tag_counter = 0
 
         main = ttk.Frame(root, padding=8)
         main.pack(fill="both", expand=True)
@@ -83,13 +92,27 @@ class GmailReportApp:
 
         ttk.Label(form, text="Correo:").pack(side="left")
         self.email_var = tk.StringVar()
-        self.email_entry = ttk.Entry(form, textvariable=self.email_var, width=48)
-        self.email_entry.pack(side="left", padx=(8, 10))
+        self.mail_email_combo_var = tk.StringVar()
+        self.mail_email_input_frame = ttk.Frame(form)
+        self.mail_email_input_frame.pack(side="left", padx=(8, 10))
+        self.email_entry = ttk.Entry(self.mail_email_input_frame, textvariable=self.email_var, width=48)
+        self.email_entry.pack(side="left")
+        self.email_combo = ttk.Combobox(
+            self.mail_email_input_frame,
+            textvariable=self.mail_email_combo_var,
+            width=24,
+            state="readonly",
+        )
+        self.email_combo.bind(self.EVT_COMBO_SELECTED, self.on_mail_email_selected)
+        self.mail_email_combo_visible = False
+        self.refresh_mail_email_selector()
 
-        self.mail_provider_combo.bind("<<ComboboxSelected>>", self.on_provider_change)
+        self.mail_provider_combo.bind(self.EVT_COMBO_SELECTED, self.on_provider_change)
 
         self.run_button = ttk.Button(form, text="Generar reporte", command=self.start_report)
         self.run_button.pack(side="left")
+        self.stop_button = ttk.Button(form, text="Detener", command=self.stop_report, state="disabled")
+        self.stop_button.pack(side="left", padx=(8, 0))
 
         ttk.Label(parent, text="Estado / progreso:").pack(anchor="w")
         self.log_box = ScrolledText(parent, height=8, wrap="word", state="disabled")
@@ -119,14 +142,29 @@ class GmailReportApp:
             state="readonly",
         )
         self.drive_provider_combo.pack(side="left", padx=(8, 10))
+        self.drive_provider_combo.bind(self.EVT_COMBO_SELECTED, self.on_drive_provider_change)
 
         ttk.Label(form, text="Correo Drive:").pack(side="left")
         self.drive_email_var = tk.StringVar()
-        self.drive_email_entry = ttk.Entry(form, textvariable=self.drive_email_var, width=38)
-        self.drive_email_entry.pack(side="left", padx=(8, 10))
+        self.drive_email_combo_var = tk.StringVar()
+        self.drive_email_input_frame = ttk.Frame(form)
+        self.drive_email_input_frame.pack(side="left", padx=(8, 10))
+        self.drive_email_entry = ttk.Entry(self.drive_email_input_frame, textvariable=self.drive_email_var, width=38)
+        self.drive_email_entry.pack(side="left")
+        self.drive_email_combo = ttk.Combobox(
+            self.drive_email_input_frame,
+            textvariable=self.drive_email_combo_var,
+            width=24,
+            state="readonly",
+        )
+        self.drive_email_combo.bind(self.EVT_COMBO_SELECTED, self.on_drive_email_selected)
+        self.drive_email_combo_visible = False
+        self.refresh_drive_email_selector()
 
         self.drive_run_button = ttk.Button(form, text="Generar listado Drive", command=self.start_drive_report)
         self.drive_run_button.pack(side="left")
+        self.drive_stop_button = ttk.Button(form, text="Detener", command=self.stop_drive_report, state="disabled")
+        self.drive_stop_button.pack(side="left", padx=(8, 0))
         self.drive_open_button = ttk.Button(form, text="Abrir último Drive", command=self.open_last_drive_report)
         self.drive_open_button.pack(side="left", padx=(8, 0))
 
@@ -139,25 +177,41 @@ class GmailReportApp:
         self.drive_notebook.pack(fill="both", expand=True)
 
     def append_log(self, message):
-        self.log_box.configure(state="normal")
-        self.log_box.insert("end", f"{message}\n")
-        self.log_box.see("end")
-        self.log_box.configure(state="disabled")
+        self.append_text_with_links(self.log_box, message)
 
     def append_drive_log(self, message):
-        self.drive_log_box.configure(state="normal")
-        self.drive_log_box.insert("end", f"{message}\n")
-        self.drive_log_box.see("end")
-        self.drive_log_box.configure(state="disabled")
+        self.append_text_with_links(self.drive_log_box, message)
+
+    def append_text_with_links(self, text_widget, message):
+        text_widget.configure(state="normal")
+        start_index = text_widget.index("end-1c")
+        text_widget.insert("end", f"{message}\n")
+
+        for match in self.URL_PATTERN.finditer(message):
+            tag = f"log_url_{self.link_tag_counter}"
+            self.link_tag_counter += 1
+            url = match.group(0)
+            tag_start = f"{start_index}+{match.start()}c"
+            tag_end = f"{start_index}+{match.end()}c"
+            text_widget.tag_add(tag, tag_start, tag_end)
+            text_widget.tag_config(tag, foreground="#1a73e8", underline=True)
+            text_widget.tag_bind(tag, self.EVT_CLICK, lambda _e, link=url: webbrowser.open(link))
+            text_widget.tag_bind(tag, self.EVT_ENTER, lambda _e: text_widget.configure(cursor="hand2"))
+            text_widget.tag_bind(tag, self.EVT_LEAVE, lambda _e: text_widget.configure(cursor="xterm"))
+
+        text_widget.see("end")
+        text_widget.configure(state="disabled")
 
     def set_running(self, running):
         if running:
             self.run_button.configure(state="disabled")
-            self.email_entry.configure(state="disabled")
+            self.stop_button.configure(state="normal")
+            self.set_mail_email_input_state("disabled")
             self.mail_provider_combo.configure(state="disabled")
         else:
             self.run_button.configure(state="normal")
-            self.email_entry.configure(state="normal")
+            self.stop_button.configure(state="disabled")
+            self.set_mail_email_input_state("normal")
             self.mail_provider_combo.configure(state="readonly")
 
     def on_provider_change(self, _event=None):
@@ -166,6 +220,164 @@ class GmailReportApp:
             self.append_log("ℹ️ Proveedor seleccionado: Outlook")
         else:
             self.append_log("ℹ️ Proveedor seleccionado: Gmail")
+
+    def on_mail_email_selected(self, _event=None):
+        selected = self.mail_email_combo_var.get().strip()
+        if selected:
+            self.email_var.set(selected)
+
+    def on_drive_provider_change(self, _event=None):
+        self.refresh_drive_email_selector()
+        self.append_drive_log(f"ℹ️ Proveedor Drive seleccionado: {self.drive_provider_var.get()}")
+
+    def on_drive_email_selected(self, _event=None):
+        selected = self.drive_email_combo_var.get().strip()
+        if selected:
+            self.drive_email_var.set(selected)
+
+    @staticmethod
+    def _guess_email_from_safe_key(safe_key):
+        if not safe_key:
+            return ""
+        parts = safe_key.split("_")
+        if len(parts) >= 3:
+            local = ".".join(parts[:-2]).strip(".")
+            domain = f"{parts[-2]}.{parts[-1]}"
+            if local and domain:
+                return f"{local}@{domain}"
+        return ""
+
+    def _extract_emails_from_file(self, file_path):
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception:
+            return []
+        return [email.lower() for email in self.EMAIL_REGEX.findall(content)]
+
+    def _collect_emails_from_token_patterns(self, patterns):
+        emails = set()
+        for pattern in patterns:
+            for path in glob(pattern):
+                emails.update(self._extract_emails_from_file(path))
+        return emails
+
+    def _collect_emails_from_prefixed_files(self, pattern_prefix_pairs):
+        emails = set()
+        for pattern, prefix in pattern_prefix_pairs:
+            for path in glob(pattern):
+                name = os.path.basename(path)
+                if not (name.endswith(".txt") or name.endswith(".csv")):
+                    continue
+                if not name.startswith(prefix):
+                    continue
+                safe = name[len(prefix):name.rfind(".")]
+                guessed = self._safe_to_email(safe)
+                if guessed:
+                    emails.add(guessed.lower())
+        return emails
+
+    @staticmethod
+    def _safe_to_email(safe_key):
+        return GmailReportApp._guess_email_from_safe_key(safe_key)
+
+    def get_previous_mail_emails(self):
+        emails = set()
+
+        if os.path.exists(self.GMAIL_SCAN_STATE_FILE):
+            try:
+                with open(self.GMAIL_SCAN_STATE_FILE, "r", encoding="utf-8") as f:
+                    state = json.load(f)
+                for raw_email in state.keys():
+                    if isinstance(raw_email, str) and "@" in raw_email:
+                        emails.add(raw_email.strip().lower())
+            except Exception:
+                pass
+
+        emails.update(self._collect_emails_from_token_patterns(["token_outlook_*.json"]))
+        emails.update(
+            self._collect_emails_from_prefixed_files(
+                [
+                    ("detalle_correos_*.txt", "detalle_correos_"),
+                    ("detalle_correos_outlook_*.txt", "detalle_correos_outlook_"),
+                ]
+            )
+        )
+
+        return sorted(emails)
+
+    def get_previous_drive_emails(self, provider):
+        if provider == "OneDrive":
+            file_prefixes = [("onedrive_archivos_*.csv", "onedrive_archivos_")]
+            token_patterns = ["token_onedrive_*.json"]
+        else:
+            file_prefixes = [("drive_archivos_*.csv", "drive_archivos_")]
+            token_patterns = ["token_drive_*.json"]
+
+        emails = set()
+        emails.update(self._collect_emails_from_prefixed_files(file_prefixes))
+        emails.update(self._collect_emails_from_token_patterns(token_patterns))
+
+        return sorted(emails)
+
+    def refresh_mail_email_selector(self):
+        current = self.email_var.get().strip()
+        previous = self.get_previous_mail_emails()
+
+        self.email_combo.pack_forget()
+        self.mail_email_combo_visible = False
+
+        if previous:
+            self.email_combo.configure(values=previous, state="readonly")
+            self.email_combo.pack(side="left", padx=(6, 0))
+            self.mail_email_combo_visible = True
+            if current in previous:
+                self.mail_email_combo_var.set(current)
+            elif not current:
+                self.email_var.set(previous[0])
+                self.mail_email_combo_var.set(previous[0])
+            else:
+                self.mail_email_combo_var.set("")
+        else:
+            self.mail_email_combo_var.set("")
+            if current:
+                self.email_var.set(current)
+
+    def refresh_drive_email_selector(self):
+        current = self.drive_email_var.get().strip()
+        provider = self.drive_provider_var.get()
+        previous = self.get_previous_drive_emails(provider)
+
+        self.drive_email_combo.pack_forget()
+        self.drive_email_combo_visible = False
+
+        if previous:
+            self.drive_email_combo.configure(values=previous, state="readonly")
+            self.drive_email_combo.pack(side="left", padx=(6, 0))
+            self.drive_email_combo_visible = True
+            if current in previous:
+                self.drive_email_combo_var.set(current)
+            elif not current:
+                self.drive_email_var.set(previous[0])
+                self.drive_email_combo_var.set(previous[0])
+            else:
+                self.drive_email_combo_var.set("")
+        else:
+            self.drive_email_combo_var.set("")
+            if current:
+                self.drive_email_var.set(current)
+
+    def set_mail_email_input_state(self, state):
+        self.email_entry.configure(state=state if state in ("disabled", "normal") else "normal")
+        if self.mail_email_combo_visible:
+            combo_state = "disabled" if state == "disabled" else "readonly"
+            self.email_combo.configure(state=combo_state)
+
+    def set_drive_email_input_state(self, state):
+        self.drive_email_entry.configure(state=state if state in ("disabled", "normal") else "normal")
+        if self.drive_email_combo_visible:
+            combo_state = "disabled" if state == "disabled" else "readonly"
+            self.drive_email_combo.configure(state=combo_state)
 
     def clear_tabs(self):
         for tab_id in self.mail_notebook.tabs():
@@ -715,6 +927,7 @@ class GmailReportApp:
         self.drive_log_box.delete("1.0", "end")
         self.drive_log_box.configure(state="disabled")
         self.clear_drive_tabs()
+        self.drive_stop_event.clear()
         self.set_drive_running(True)
         self.append_drive_log(f"▶️ Iniciando análisis de {provider} para: {drive_email}")
         self.drive_worker_thread = threading.Thread(target=self.run_drive_report, args=(drive_email, provider), daemon=True)
@@ -723,14 +936,26 @@ class GmailReportApp:
     def set_drive_running(self, running):
         if running:
             self.drive_run_button.configure(state="disabled")
+            self.drive_stop_button.configure(state="normal")
             self.drive_open_button.configure(state="disabled")
-            self.drive_email_entry.configure(state="disabled")
+            self.set_drive_email_input_state("disabled")
             self.drive_provider_combo.configure(state="disabled")
         else:
             self.drive_run_button.configure(state="normal")
+            self.drive_stop_button.configure(state="disabled")
             self.drive_open_button.configure(state="normal")
-            self.drive_email_entry.configure(state="normal")
+            self.set_drive_email_input_state("normal")
             self.drive_provider_combo.configure(state="readonly")
+
+    def stop_report(self):
+        if self.mail_worker_thread and self.mail_worker_thread.is_alive():
+            self.mail_stop_event.set()
+            self.append_log("⏹ Solicitud de detención enviada. Esperando punto seguro de cancelación...")
+
+    def stop_drive_report(self):
+        if self.drive_worker_thread and self.drive_worker_thread.is_alive():
+            self.drive_stop_event.set()
+            self.append_drive_log("⏹ Solicitud de detención enviada. Esperando punto seguro de cancelación...")
 
     def open_last_drive_report(self):
         drive_email = self.drive_email_var.get().strip()
@@ -753,14 +978,20 @@ class GmailReportApp:
                 self.events.put(("drive_log", message))
 
             if provider == "OneDrive":
-                list_file = list_onedrive(drive_email, log=emit_drive)
+                list_file = list_onedrive(drive_email, log=emit_drive, stop_event=self.drive_stop_event)
             else:
-                list_file = list_drive(drive_email)
+                list_file = list_drive(drive_email, stop_event=self.drive_stop_event)
+            if self.drive_stop_event.is_set():
+                raise RuntimeError(self.CANCEL_MESSAGE)
             summary_file = process_extensions(input_file=list_file)
             files = [list_file, summary_file]
             self.events.put(("drive_done", {"files": files}))
         except Exception as exc:
-            self.events.put(("drive_error", str(exc)))
+            message = str(exc)
+            if message == self.CANCEL_MESSAGE or self.drive_stop_event.is_set():
+                self.events.put(("drive_cancelled", message or self.CANCEL_MESSAGE))
+            else:
+                self.events.put(("drive_error", message))
 
     def start_report(self):
         email = self.email_var.get().strip()
@@ -774,6 +1005,7 @@ class GmailReportApp:
         self.log_box.configure(state="disabled")
         self.set_summary(None)
         self.clear_tabs()
+        self.mail_stop_event.clear()
 
         self.append_log(f"▶️ Iniciando análisis {provider} para: {email}")
         self.set_running(True)
@@ -787,12 +1019,16 @@ class GmailReportApp:
 
         try:
             if provider == "Outlook":
-                result = process_outlook(user_email=email, log=emit)
+                result = process_outlook(user_email=email, log=emit, stop_event=self.mail_stop_event)
             else:
-                result = process_gmail(user_email=email, log=emit)
+                result = process_gmail(user_email=email, log=emit, stop_event=self.mail_stop_event)
             self.events.put(("done", result))
         except Exception as exc:
-            self.events.put(("error", str(exc)))
+            message = str(exc)
+            if message == self.CANCEL_MESSAGE or self.mail_stop_event.is_set():
+                self.events.put(("cancelled", message or self.CANCEL_MESSAGE))
+            else:
+                self.events.put(("error", message))
 
     def handle_mail_done_event(self, payload):
         self.set_running(False)
@@ -800,12 +1036,14 @@ class GmailReportApp:
         summary = payload.get("summary") if isinstance(payload, dict) else None
         self.build_tabs(files)
         self.set_summary(summary)
+        self.refresh_mail_email_selector()
         self.append_log("✅ Reporte finalizado y cargado en pestañas.")
 
     def handle_drive_done_event(self, payload):
         self.set_drive_running(False)
         files = payload.get("files", []) if isinstance(payload, dict) else payload
         self.render_drive_tabs(files)
+        self.refresh_drive_email_selector()
         self.append_drive_log("✅ Reporte de Drive finalizado y cargado en pestañas.")
 
     def handle_error_event(self, payload):
@@ -813,10 +1051,18 @@ class GmailReportApp:
         self.append_log("❌ Error durante el procesamiento:")
         self.append_log(payload)
 
+    def handle_cancelled_event(self, payload):
+        self.set_running(False)
+        self.append_log(f"⏹ {payload or self.CANCEL_MESSAGE}")
+
     def handle_drive_error_event(self, payload):
         self.set_drive_running(False)
         self.append_drive_log("❌ Error durante el procesamiento de Drive:")
         self.append_drive_log(payload)
+
+    def handle_drive_cancelled_event(self, payload):
+        self.set_drive_running(False)
+        self.append_drive_log(f"⏹ {payload or self.CANCEL_MESSAGE}")
 
     def dispatch_event(self, event, payload):
         if event == "log":
@@ -829,8 +1075,12 @@ class GmailReportApp:
             self.handle_drive_done_event(payload)
         elif event == "drive_error":
             self.handle_drive_error_event(payload)
+        elif event == "drive_cancelled":
+            self.handle_drive_cancelled_event(payload)
         elif event == "error":
             self.handle_error_event(payload)
+        elif event == "cancelled":
+            self.handle_cancelled_event(payload)
 
     def consume_events(self):
         try:

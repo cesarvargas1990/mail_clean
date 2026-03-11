@@ -1,4 +1,5 @@
 import os
+import webbrowser
 from glob import glob
 
 import requests
@@ -11,6 +12,7 @@ SCOPES = [
     "User.Read",
 ]
 CREDENTIAL_CANDIDATES = ["credentials.json", "client_secret.json"]
+CANCEL_MESSAGE = "Operación cancelada por el usuario."
 
 
 def _safe_user_key(user_email):
@@ -57,7 +59,21 @@ def find_client_secrets_file():
     return None
 
 
-def get_access_token(user_email=None, log=print):
+def ensure_not_cancelled(stop_event=None):
+    if stop_event is not None and stop_event.is_set():
+        raise RuntimeError(CANCEL_MESSAGE)
+
+
+def open_auth_url(log=print):
+    url = "https://www.microsoft.com/link"
+    try:
+        webbrowser.open(url)
+        log(f"🌐 Abriendo navegador: {url}")
+    except Exception:
+        pass
+
+
+def get_access_token(user_email=None, log=print, stop_event=None):
     token_path = _safe_token_file(user_email)
 
     cache = msal.SerializableTokenCache()
@@ -76,6 +92,8 @@ def get_access_token(user_email=None, log=print):
     if accounts:
         result = app.acquire_token_silent(SCOPES, account=accounts[0])
 
+    ensure_not_cancelled(stop_event)
+
     if not result:
         flow = app.initiate_device_flow(scopes=SCOPES)
         if "user_code" not in flow:
@@ -84,6 +102,7 @@ def get_access_token(user_email=None, log=print):
         log("🔐 Autenticación necesaria para OneDrive:")
         log(flow.get("message", ""))
         log("(Ingresa el código, acepta permisos y vuelve a esta ventana.)")
+        open_auth_url(log=log)
 
         result = app.acquire_token_by_device_flow(flow)
         if "access_token" not in result:
@@ -96,9 +115,9 @@ def get_access_token(user_email=None, log=print):
     return result["access_token"]
 
 
-def list_onedrive(user_email=None, log=print):
+def list_onedrive(user_email=None, log=print, stop_event=None):
     output_file = _safe_output_file(user_email)
-    token = get_access_token(user_email, log=log)
+    token = get_access_token(user_email, log=log, stop_event=stop_event)
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -111,6 +130,7 @@ def list_onedrive(user_email=None, log=print):
     files = []
 
     while url:
+        ensure_not_cancelled(stop_event)
         resp = requests.get(url, headers=headers, timeout=30)
         if resp.status_code != 200:
             raise RuntimeError(f"Error listando OneDrive: {resp.status_code} {resp.text}")

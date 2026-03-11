@@ -18,6 +18,7 @@ MAX_SCAN_AGE_DAYS = 2
 CURRENT_USER_ID = "me"
 CURRENT_TOKEN_FILE = TOKEN_GMAIL_DEFAULT
 CREDENTIAL_CANDIDATES = ["credentials.json", "client_secret.json"]
+CANCEL_MESSAGE = "Operación cancelada por el usuario."
 
 
 def _safe_token_file(user_email):
@@ -139,6 +140,11 @@ def get_service(token_file=TOKEN_GMAIL_DEFAULT):
     return build("gmail", "v1", credentials=creds)
 
 
+def ensure_not_cancelled(stop_event=None):
+    if stop_event is not None and stop_event.is_set():
+        raise RuntimeError(CANCEL_MESSAGE)
+
+
 def extract_domain(email):
     """Extrae el dominio de un correo."""
     email = email.lower().strip()
@@ -255,10 +261,11 @@ def init_worker(user_id, token_file):
     CURRENT_TOKEN_FILE = token_file
 
 
-def list_message_ids(service, user_id):
+def list_message_ids(service, user_id, stop_event=None):
     ids = []
     page = None
     while True:
+        ensure_not_cancelled(stop_event)
         resp = service.users().messages().list(
             userId=user_id,
             pageToken=page,
@@ -442,7 +449,7 @@ def build_summary(user_id, source, report_files):
     }
 
 
-def process(user_email=None, processes=PROCESSES, log=print):
+def process(user_email=None, processes=PROCESSES, log=print, stop_event=None):
     user_id = (user_email or "").strip() or "me"
     token_file = _safe_token_file(user_id)
     report_files = get_report_files(user_id)
@@ -468,10 +475,11 @@ def process(user_email=None, processes=PROCESSES, log=print):
             logger("⚠️ No se pudo eliminar el token anterior; se intentará continuar.")
 
     logger("🔐 Autenticando...")
+    ensure_not_cancelled(stop_event)
     service = get_service(token_file)
 
     logger("🔍 Obteniendo lista de IDs...")
-    ids = list_message_ids(service, user_id)
+    ids = list_message_ids(service, user_id, stop_event=stop_event)
 
     logger(f"📬 Total mensajes: {len(ids)}")
 
@@ -483,9 +491,19 @@ def process(user_email=None, processes=PROCESSES, log=print):
 
     if chunks:
         with mp.Pool(processes, initializer=init_worker, initargs=(user_id, token_file)) as pool:
-            results = pool.map(process_chunk, chunks)
+            async_result = pool.map_async(process_chunk, chunks)
+            try:
+                while not async_result.ready():
+                    ensure_not_cancelled(stop_event)
+                    async_result.wait(timeout=0.2)
+                results = async_result.get()
+            except Exception:
+                pool.terminate()
+                raise
     else:
         results = []
+
+    ensure_not_cancelled(stop_event)
 
     from_counter = {}
     to_counter = {}
@@ -528,6 +546,7 @@ def process(user_email=None, processes=PROCESSES, log=print):
 
     logger(f"📄 Archivo generado: {domain_report_file}")
 
+    ensure_not_cancelled(stop_event)
     update_last_scan(user_id, report_files)
     logger(f"🗓️ Fecha de último escaneo guardada en: {SCAN_STATE_FILE}")
 

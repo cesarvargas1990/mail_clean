@@ -6,9 +6,10 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+SCOPES = ["https://www.googleapis.com/auth/drive"]
 CREDENTIAL_CANDIDATES = ["credentials.json", "client_secret.json"]
 DEFAULT_DRIVE_TOKEN_FILE = "token_drive.json"
+CANCEL_MESSAGE = "Operación cancelada por el usuario."
 
 
 def find_client_secrets_file():
@@ -90,11 +91,17 @@ def run_oauth_flow():
         raise
 
 
-def get_service(user_email=None):
+def ensure_not_cancelled(stop_event=None):
+    if stop_event is not None and stop_event.is_set():
+        raise RuntimeError(CANCEL_MESSAGE)
+
+
+def get_service(user_email=None, stop_event=None):
     token_path = _safe_drive_token_file(user_email)
     creds = load_drive_credentials(token_path)
 
     if not creds or not creds.valid:
+        ensure_not_cancelled(stop_event)
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
@@ -106,13 +113,14 @@ def get_service(user_email=None):
     return build("drive", "v3", credentials=creds)
 
 
-def build_folder_map(service):
+def build_folder_map(service, stop_event=None):
     print("📂 Descargando estructura de carpetas…")
 
     folder_map = {}
     page = None
 
     while True:
+        ensure_not_cancelled(stop_event)
         resp = service.files().list(
             q="mimeType='application/vnd.google-apps.folder'",
             fields="nextPageToken, files(id,name,parents)",
@@ -157,8 +165,8 @@ def resolve_path(file, folder_map, cache):
     return full_path
 
 
-def list_drive(user_email=None):
-    service = get_service(user_email)
+def list_drive(user_email=None, stop_event=None):
+    service = get_service(user_email, stop_event=stop_event)
     output_file = _safe_drive_csv_file(user_email)
 
     print("🔍 Descargando lista de archivos…")
@@ -167,6 +175,7 @@ def list_drive(user_email=None):
     page = None
 
     while True:
+        ensure_not_cancelled(stop_event)
         resp = service.files().list(
             fields="nextPageToken, files(id,name,size,mimeType,parents)",
             pageSize=1000,
@@ -181,7 +190,7 @@ def list_drive(user_email=None):
 
     print(f"📄 Total archivos: {len(files)}")
 
-    folder_map = build_folder_map(service)
+    folder_map = build_folder_map(service, stop_event=stop_event)
     cache = {}
 
     for f in files:
