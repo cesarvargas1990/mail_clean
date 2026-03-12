@@ -359,7 +359,7 @@ class GmailReportApp:
                 )
             )
         else:
-            emails.update(self._collect_emails_from_token_patterns(["token_gmail_*.json"]))
+            emails.update(self._collect_emails_from_token_patterns(["token_google_mail_*.json", "token_gmail_*.json"]))
             emails.update(
                 self._collect_emails_from_prefixed_files(
                     [("detalle_correos_*.txt", "detalle_correos_", ("detalle_correos_outlook_",))]
@@ -374,7 +374,7 @@ class GmailReportApp:
             token_patterns = ["token_onedrive_*.json"]
         else:
             file_prefixes = [("drive_archivos_*.csv", "drive_archivos_")]
-            token_patterns = ["token_drive_*.json"]
+            token_patterns = ["token_google_drive_*.json", "token_drive_*.json"]
 
         emails = set()
         emails.update(self._collect_emails_from_prefixed_files(file_prefixes))
@@ -999,6 +999,18 @@ class GmailReportApp:
             messagebox.showwarning(self.REQUIRED_EMAIL_TITLE, "Ingresa el correo para Drive.")
             return
 
+        reauth_choice = messagebox.askyesnocancel(
+            "Procesar Drive",
+            (
+                f"Se consultará nuevamente el servidor para {drive_email}.\n\n"
+                "Sí: volver a generar token y pedir credenciales de nuevo.\n"
+                "No: intentar usar las credenciales ya guardadas.\n"
+                "Cancelar: no procesar."
+            ),
+        )
+        if reauth_choice is None:
+            return
+
         self.drive_log_box.configure(state="normal")
         self.drive_log_box.delete("1.0", "end")
         self.drive_log_box.configure(state="disabled")
@@ -1006,7 +1018,15 @@ class GmailReportApp:
         self.drive_stop_event.clear()
         self.set_drive_running(True)
         self.append_drive_log(f"▶️ Iniciando análisis de {provider} para: {drive_email}")
-        self.drive_worker_thread = threading.Thread(target=self.run_drive_report, args=(drive_email, provider), daemon=True)
+        if reauth_choice:
+            self.append_drive_log("🔐 Se forzará nuevo login para este acceso.")
+        else:
+            self.append_drive_log("🔐 Se intentará usar el token guardado antes de pedir credenciales.")
+        self.drive_worker_thread = threading.Thread(
+            target=self.run_drive_report,
+            args=(drive_email, provider, reauth_choice),
+            daemon=True,
+        )
         self.drive_worker_thread.start()
 
     def set_drive_running(self, running):
@@ -1069,15 +1089,24 @@ class GmailReportApp:
         self.set_summary(self.build_existing_mail_summary(email, provider, files))
         self.append_log(f"ℹ️ Se cargaron los últimos archivos de {provider} sin reprocesar.")
 
-    def run_drive_report(self, drive_email, provider):
+    def run_drive_report(self, drive_email, provider, force_reauth):
         try:
             def emit_drive(message):
                 self.events.put(("drive_log", message))
 
             if provider == "OneDrive":
-                list_file = list_onedrive(drive_email, log=emit_drive, stop_event=self.drive_stop_event)
+                list_file = list_onedrive(
+                    drive_email,
+                    log=emit_drive,
+                    stop_event=self.drive_stop_event,
+                    force_reauth=force_reauth,
+                )
             else:
-                list_file = list_drive(drive_email, stop_event=self.drive_stop_event)
+                list_file = list_drive(
+                    drive_email,
+                    stop_event=self.drive_stop_event,
+                    force_reauth=force_reauth,
+                )
             if self.drive_stop_event.is_set():
                 raise RuntimeError(self.CANCEL_MESSAGE)
             summary_file = process_extensions(input_file=list_file)
@@ -1097,6 +1126,18 @@ class GmailReportApp:
             messagebox.showwarning(self.REQUIRED_EMAIL_TITLE, f"Ingresa el correo {provider} a procesar.")
             return
 
+        reauth_choice = messagebox.askyesnocancel(
+            "Procesar correo",
+            (
+                f"Se consultará nuevamente el servidor para {email}.\n\n"
+                "Sí: volver a generar token y pedir credenciales de nuevo.\n"
+                "No: intentar usar las credenciales ya guardadas.\n"
+                "Cancelar: no procesar."
+            ),
+        )
+        if reauth_choice is None:
+            return
+
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
@@ -1105,20 +1146,40 @@ class GmailReportApp:
         self.mail_stop_event.clear()
 
         self.append_log(f"▶️ Iniciando análisis {provider} para: {email}")
+        if reauth_choice:
+            self.append_log("🔐 Se forzará nuevo login para este correo.")
+        else:
+            self.append_log("🔐 Se intentará usar el token guardado antes de pedir credenciales.")
         self.set_running(True)
 
-        self.mail_worker_thread = threading.Thread(target=self.run_report, args=(email, provider), daemon=True)
+        self.mail_worker_thread = threading.Thread(
+            target=self.run_report,
+            args=(email, provider, reauth_choice),
+            daemon=True,
+        )
         self.mail_worker_thread.start()
 
-    def run_report(self, email, provider):
+    def run_report(self, email, provider, force_reauth):
         def emit(message):
             self.events.put(("log", message))
 
         try:
             if provider == "Outlook":
-                result = process_outlook(user_email=email, log=emit, stop_event=self.mail_stop_event)
+                result = process_outlook(
+                    user_email=email,
+                    log=emit,
+                    stop_event=self.mail_stop_event,
+                    force_refresh=True,
+                    force_reauth=force_reauth,
+                )
             else:
-                result = process_gmail(user_email=email, log=emit, stop_event=self.mail_stop_event, force_refresh=True)
+                result = process_gmail(
+                    user_email=email,
+                    log=emit,
+                    stop_event=self.mail_stop_event,
+                    force_refresh=True,
+                    force_reauth=force_reauth,
+                )
             self.events.put(("done", result))
         except Exception as exc:
             message = str(exc)

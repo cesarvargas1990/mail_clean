@@ -36,6 +36,12 @@ def _safe_output_file(user_email):
     return f"onedrive_archivos_{clean}.csv"
 
 
+def remove_onedrive_token(user_email):
+    token_path = _safe_token_file(user_email)
+    if os.path.exists(token_path):
+        os.remove(token_path)
+
+
 def human_size(num_bytes):
     if num_bytes is None:
         return "0 B"
@@ -73,8 +79,10 @@ def open_auth_url(log=print):
         pass
 
 
-def get_access_token(user_email=None, log=print, stop_event=None):
+def get_access_token(user_email=None, log=print, stop_event=None, force_reauth=False):
     token_path = _safe_token_file(user_email)
+    if force_reauth:
+        remove_onedrive_token(user_email)
 
     cache = msal.SerializableTokenCache()
     if os.path.exists(token_path):
@@ -115,9 +123,14 @@ def get_access_token(user_email=None, log=print, stop_event=None):
     return result["access_token"]
 
 
-def list_onedrive(user_email=None, log=print, stop_event=None):
+def list_onedrive(user_email=None, log=print, stop_event=None, force_reauth=False):
     output_file = _safe_output_file(user_email)
-    token = get_access_token(user_email, log=log, stop_event=stop_event)
+    token = get_access_token(
+        user_email,
+        log=log,
+        stop_event=stop_event,
+        force_reauth=force_reauth,
+    )
 
     headers = {
         "Authorization": f"Bearer {token}",

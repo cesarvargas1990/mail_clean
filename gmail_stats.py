@@ -10,7 +10,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
 PROCESSES = 12
-TOKEN_GMAIL_DEFAULT = "token_gmail.json"
+TOKEN_GMAIL_DEFAULT = "token_google_mail.json"
+LEGACY_TOKEN_GMAIL_DEFAULT = "token_gmail.json"
 DETAIL_REPORT_FILE = "detalle_correos.txt"
 DOMAIN_REPORT_FILE = "dominios.txt"
 SCAN_STATE_FILE = "gmail_scan_state.json"
@@ -25,6 +26,14 @@ def _safe_token_file(user_email):
     user_email = (user_email or "").strip().lower()
     if not user_email or user_email == "me":
         return TOKEN_GMAIL_DEFAULT
+    clean = "".join(c if c.isalnum() else "_" for c in user_email)
+    return f"token_google_mail_{clean}.json"
+
+
+def _legacy_token_file(user_email):
+    user_email = (user_email or "").strip().lower()
+    if not user_email or user_email == "me":
+        return LEGACY_TOKEN_GMAIL_DEFAULT
     clean = "".join(c if c.isalnum() else "_" for c in user_email)
     return f"token_gmail_{clean}.json"
 
@@ -122,8 +131,17 @@ def find_client_secrets_file():
 
 def get_service(token_file=TOKEN_GMAIL_DEFAULT):
     """Crea un cliente Gmail API aislado por proceso."""
-    if os.path.exists(token_file):
-        creds = Credentials.from_authorized_user_file(token_file, SCOPES)
+    resolved_token_file = token_file
+    if not os.path.exists(resolved_token_file):
+        legacy_token_file = _legacy_token_file("")
+        if token_file != TOKEN_GMAIL_DEFAULT:
+            inferred_user = token_file.removeprefix("token_google_mail_").removesuffix(".json")
+            legacy_token_file = f"token_gmail_{inferred_user}.json"
+        if os.path.exists(legacy_token_file):
+            resolved_token_file = legacy_token_file
+
+    if os.path.exists(resolved_token_file):
+        creds = Credentials.from_authorized_user_file(resolved_token_file, SCOPES)
     else:
         client_secrets_file = find_client_secrets_file()
         if not client_secrets_file:
@@ -449,9 +467,17 @@ def build_summary(user_id, source, report_files):
     }
 
 
-def process(user_email=None, processes=PROCESSES, log=print, stop_event=None, force_refresh=False):
+def process(
+    user_email=None,
+    processes=PROCESSES,
+    log=print,
+    stop_event=None,
+    force_refresh=False,
+    force_reauth=False,
+):
     user_id = (user_email or "").strip() or "me"
     token_file = _safe_token_file(user_id)
+    legacy_token_file = _legacy_token_file(user_id)
     report_files = get_report_files(user_id)
     detail_report_file = report_files["detail"]
     domain_report_file = report_files["domain"]
@@ -470,12 +496,17 @@ def process(user_email=None, processes=PROCESSES, log=print, stop_event=None, fo
         }
 
     logger(f"ℹ️ {refresh_reason}")
-    if os.path.exists(token_file):
-        try:
-            os.remove(token_file)
+    if force_reauth:
+        deleted_any = False
+        for candidate in (token_file, legacy_token_file):
+            if os.path.exists(candidate):
+                try:
+                    os.remove(candidate)
+                    deleted_any = True
+                except Exception:
+                    logger("⚠️ No se pudo eliminar un token anterior; se intentará continuar.")
+        if deleted_any:
             logger("🔁 Token anterior eliminado para forzar nuevo login.")
-        except Exception:
-            logger("⚠️ No se pudo eliminar el token anterior; se intentará continuar.")
 
     logger("🔐 Autenticando...")
     ensure_not_cancelled(stop_event)

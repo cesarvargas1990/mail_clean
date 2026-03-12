@@ -6,7 +6,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
 
-SCOPES = ["https://www.googleapis.com/auth/drive"]
+DRIVE_READ_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+DRIVE_WRITE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 CREDENTIAL_CANDIDATES = ["credentials.json", "client_secret.json"]
 DEFAULT_DRIVE_TOKEN_FILE = "token_drive.json"
 CANCEL_MESSAGE = "Operación cancelada por el usuario."
@@ -45,6 +46,12 @@ def _safe_drive_csv_file(user_email):
     return f"drive_archivos_{clean}.csv"
 
 
+def remove_drive_token(user_email):
+    token_path = _safe_drive_token_file(user_email)
+    if os.path.exists(token_path):
+        os.remove(token_path)
+
+
 def human_size(num_bytes):
     """Convierte bytes a MB o GB con 2 decimales."""
     if num_bytes is None:
@@ -60,17 +67,17 @@ def human_size(num_bytes):
     return f"{gb:.2f} GB"
 
 
-def load_drive_credentials(token_path):
+def load_drive_credentials(token_path, scopes):
     if os.path.exists(token_path):
-        return Credentials.from_authorized_user_file(token_path, SCOPES)
+        return Credentials.from_authorized_user_file(token_path, scopes)
 
     if token_path != DEFAULT_DRIVE_TOKEN_FILE and os.path.exists(DEFAULT_DRIVE_TOKEN_FILE):
-        return Credentials.from_authorized_user_file(DEFAULT_DRIVE_TOKEN_FILE, SCOPES)
+        return Credentials.from_authorized_user_file(DEFAULT_DRIVE_TOKEN_FILE, scopes)
 
     return None
 
 
-def run_oauth_flow():
+def run_oauth_flow(scopes):
     client_secrets_file = find_client_secrets_file()
     if not client_secrets_file:
         raise RuntimeError(
@@ -78,7 +85,7 @@ def run_oauth_flow():
             "Coloca credentials.json o client_secret.json en la carpeta del proyecto."
         )
 
-    flow = InstalledAppFlow.from_client_secrets_file(client_secrets_file, SCOPES)
+    flow = InstalledAppFlow.from_client_secrets_file(client_secrets_file, scopes)
     try:
         return flow.run_local_server(port=0)
     except Exception as exc:
@@ -96,16 +103,25 @@ def ensure_not_cancelled(stop_event=None):
         raise RuntimeError(CANCEL_MESSAGE)
 
 
-def get_service(user_email=None, stop_event=None):
+def get_service(user_email=None, stop_event=None, scopes=None, force_reauth=False):
+    scopes = scopes or DRIVE_READ_SCOPES
     token_path = _safe_drive_token_file(user_email)
-    creds = load_drive_credentials(token_path)
+    if force_reauth:
+        remove_drive_token(user_email)
+    creds = load_drive_credentials(token_path, scopes)
 
     if not creds or not creds.valid:
         ensure_not_cancelled(stop_event)
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except Exception as exc:
+                if "invalid_scope" in str(exc).lower():
+                    creds = run_oauth_flow(scopes)
+                else:
+                    raise
         else:
-            creds = run_oauth_flow()
+            creds = run_oauth_flow(scopes)
 
         with open(token_path, "w") as f:
             f.write(creds.to_json())
@@ -165,8 +181,13 @@ def resolve_path(file, folder_map, cache):
     return full_path
 
 
-def list_drive(user_email=None, stop_event=None):
-    service = get_service(user_email, stop_event=stop_event)
+def list_drive(user_email=None, stop_event=None, force_reauth=False):
+    service = get_service(
+        user_email,
+        stop_event=stop_event,
+        scopes=DRIVE_READ_SCOPES,
+        force_reauth=force_reauth,
+    )
     output_file = _safe_drive_csv_file(user_email)
 
     print("🔍 Descargando lista de archivos…")
@@ -230,7 +251,7 @@ def delete_drive_file(file_id, user_email=None):
     if not file_id:
         raise ValueError("Se requiere file_id para eliminar en Drive.")
 
-    service = get_service(user_email)
+    service = get_service(user_email, scopes=DRIVE_WRITE_SCOPES)
     service.files().delete(fileId=file_id).execute()
 
 

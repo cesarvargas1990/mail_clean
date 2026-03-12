@@ -286,12 +286,19 @@ def write_counter_block(file_obj, title, with_attachments, without_attachments):
 
 # ==== FLUJO PRINCIPAL ====
 
-def process(user_email=None, processes=PROCESSES, log=print, stop_event=None):
+def process(user_email=None, processes=PROCESSES, log=print, stop_event=None, force_refresh=False, force_reauth=False):
     global CURRENT_TOKEN_CACHE_FILE, CURRENT_ACCESS_TOKEN
     user_id = (user_email or "").strip() or "me"
     logger = log if callable(log) else print
     CURRENT_TOKEN_CACHE_FILE = _safe_token_file(user_id)
     report_files = get_report_files(user_id)
+
+    if force_reauth and os.path.exists(CURRENT_TOKEN_CACHE_FILE):
+        try:
+            os.remove(CURRENT_TOKEN_CACHE_FILE)
+            logger("🔁 Token anterior eliminado para forzar nuevo login en Outlook.")
+        except Exception:
+            logger("⚠️ No se pudo eliminar el token anterior de Outlook; se intentará continuar.")
 
     logger("🔐 Preparando autenticación (Outlook / Hotmail)...")
     logger(f"⚙️ Modo optimizado activo (parámetro procesos={processes}).")
