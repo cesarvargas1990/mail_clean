@@ -449,7 +449,7 @@ def build_summary(user_id, source, report_files):
     }
 
 
-def process(user_email=None, processes=PROCESSES, log=print, stop_event=None):
+def process(user_email=None, processes=PROCESSES, log=print, stop_event=None, force_refresh=False):
     user_id = (user_email or "").strip() or "me"
     token_file = _safe_token_file(user_id)
     report_files = get_report_files(user_id)
@@ -458,6 +458,9 @@ def process(user_email=None, processes=PROCESSES, log=print, stop_event=None):
     logger = log if callable(log) else print
 
     refresh_required, refresh_reason = should_refresh_scan(user_id, token_file, report_files)
+    if force_refresh:
+        refresh_required = True
+        refresh_reason = "Se solicitó procesamiento forzado desde la interfaz."
     if not refresh_required:
         logger(f"ℹ️ {refresh_reason}")
         logger("📁 Cargando reportes existentes sin reautenticación.")

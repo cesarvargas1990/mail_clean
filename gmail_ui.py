@@ -12,7 +12,13 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
 
-from gmail_stats import process as process_gmail
+from gmail_stats import (
+    get_last_scan as get_gmail_last_scan,
+    get_report_files as get_gmail_report_files,
+    parse_detail_summary,
+    process as process_gmail,
+)
+from outlook_stats import get_report_files as get_outlook_report_files
 from outlook_stats import process as process_outlook
 from drive_stats import list_drive, delete_drive_file
 from drive_stats2 import process_extensions
@@ -32,6 +38,8 @@ class GmailReportApp:
     GMAIL_SCAN_STATE_FILE = "gmail_scan_state.json"
     EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
     CANCEL_MESSAGE = "Operación cancelada por el usuario."
+    SECONDARY_FIELD_MIN_WIDTH = 240
+    PRIMARY_EMAIL_FIELD_MIN_WIDTH = 360
 
     def __init__(self, root):
         self.root = root
@@ -79,28 +87,42 @@ class GmailReportApp:
         form = ttk.Frame(parent)
         form.pack(fill="x", pady=(0, 6))
 
-        ttk.Label(form, text="Proveedor:").pack(side="left")
+        fields_row = ttk.Frame(form)
+        fields_row.pack(fill="x")
+        fields_row.columnconfigure(0, weight=2, minsize=self.SECONDARY_FIELD_MIN_WIDTH)
+        fields_row.columnconfigure(1, weight=3, minsize=self.PRIMARY_EMAIL_FIELD_MIN_WIDTH)
+        fields_row.columnconfigure(2, weight=2, minsize=self.SECONDARY_FIELD_MIN_WIDTH)
+        actions_row = ttk.Frame(form)
+        actions_row.pack(anchor="w", pady=(6, 0))
+
+        provider_field = ttk.Frame(fields_row)
+        provider_field.grid(row=0, column=0, sticky="ew", padx=(0, 12))
+        ttk.Label(provider_field, text="Proveedor:").pack(anchor="w")
         self.mail_provider_var = tk.StringVar(value="Gmail")
         self.mail_provider_combo = ttk.Combobox(
-            form,
+            provider_field,
             textvariable=self.mail_provider_var,
             values=["Gmail", "Outlook"],
-            width=10,
             state="readonly",
         )
-        self.mail_provider_combo.pack(side="left", padx=(8, 10))
+        self.mail_provider_combo.pack(fill="x")
 
-        ttk.Label(form, text="Correo:").pack(side="left")
+        email_field = ttk.Frame(fields_row)
+        email_field.grid(row=0, column=1, sticky="ew", padx=(0, 12))
+        ttk.Label(email_field, text="Correo:").pack(anchor="w")
         self.email_var = tk.StringVar()
         self.mail_email_combo_var = tk.StringVar()
-        self.mail_email_input_frame = ttk.Frame(form)
-        self.mail_email_input_frame.pack(side="left", padx=(8, 10))
-        self.email_entry = ttk.Entry(self.mail_email_input_frame, textvariable=self.email_var, width=48)
-        self.email_entry.pack(side="left")
+        self.email_entry = ttk.Entry(email_field, textvariable=self.email_var)
+        self.email_entry.pack(fill="x")
+
+        saved_email_field = ttk.Frame(fields_row)
+        saved_email_field.grid(row=0, column=2, sticky="ew")
+        ttk.Label(saved_email_field, text="Correo guardado:").pack(anchor="w")
+        self.mail_saved_email_frame = ttk.Frame(saved_email_field)
+        self.mail_saved_email_frame.pack(fill="x")
         self.email_combo = ttk.Combobox(
-            self.mail_email_input_frame,
+            self.mail_saved_email_frame,
             textvariable=self.mail_email_combo_var,
-            width=24,
             state="readonly",
         )
         self.email_combo.bind(self.EVT_COMBO_SELECTED, self.on_mail_email_selected)
@@ -109,9 +131,15 @@ class GmailReportApp:
 
         self.mail_provider_combo.bind(self.EVT_COMBO_SELECTED, self.on_provider_change)
 
-        self.run_button = ttk.Button(form, text="Generar reporte", command=self.start_report)
+        self.run_button = ttk.Button(actions_row, text="Procesar correo", command=self.start_report)
         self.run_button.pack(side="left")
-        self.stop_button = ttk.Button(form, text="Detener", command=self.stop_report, state="disabled")
+        self.load_existing_button = ttk.Button(
+            actions_row,
+            text="Cargar existente",
+            command=self.load_existing_mail_report,
+        )
+        self.load_existing_button.pack(side="left", padx=(8, 0))
+        self.stop_button = ttk.Button(actions_row, text="Detener", command=self.stop_report, state="disabled")
         self.stop_button.pack(side="left", padx=(8, 0))
 
         ttk.Label(parent, text="Estado / progreso:").pack(anchor="w")
@@ -132,41 +160,59 @@ class GmailReportApp:
         form = ttk.Frame(parent)
         form.pack(fill="x", pady=(0, 6))
 
-        ttk.Label(form, text="Proveedor:").pack(side="left")
+        fields_row = ttk.Frame(form)
+        fields_row.pack(fill="x")
+        fields_row.columnconfigure(0, weight=2, minsize=self.SECONDARY_FIELD_MIN_WIDTH)
+        fields_row.columnconfigure(1, weight=3, minsize=self.PRIMARY_EMAIL_FIELD_MIN_WIDTH)
+        fields_row.columnconfigure(2, weight=2, minsize=self.SECONDARY_FIELD_MIN_WIDTH)
+        actions_row = ttk.Frame(form)
+        actions_row.pack(anchor="w", pady=(6, 0))
+
+        provider_field = ttk.Frame(fields_row)
+        provider_field.grid(row=0, column=0, sticky="ew", padx=(0, 12))
+        ttk.Label(provider_field, text="Proveedor:").pack(anchor="w")
         self.drive_provider_var = tk.StringVar(value="Google Drive")
         self.drive_provider_combo = ttk.Combobox(
-            form,
+            provider_field,
             textvariable=self.drive_provider_var,
             values=["Google Drive", "OneDrive"],
-            width=13,
             state="readonly",
         )
-        self.drive_provider_combo.pack(side="left", padx=(8, 10))
+        self.drive_provider_combo.pack(fill="x")
         self.drive_provider_combo.bind(self.EVT_COMBO_SELECTED, self.on_drive_provider_change)
 
-        ttk.Label(form, text="Correo Drive:").pack(side="left")
+        drive_email_field = ttk.Frame(fields_row)
+        drive_email_field.grid(row=0, column=1, sticky="ew", padx=(0, 12))
+        ttk.Label(drive_email_field, text="Correo Drive:").pack(anchor="w")
         self.drive_email_var = tk.StringVar()
         self.drive_email_combo_var = tk.StringVar()
-        self.drive_email_input_frame = ttk.Frame(form)
-        self.drive_email_input_frame.pack(side="left", padx=(8, 10))
-        self.drive_email_entry = ttk.Entry(self.drive_email_input_frame, textvariable=self.drive_email_var, width=38)
-        self.drive_email_entry.pack(side="left")
+        self.drive_email_entry = ttk.Entry(drive_email_field, textvariable=self.drive_email_var)
+        self.drive_email_entry.pack(fill="x")
+
+        drive_saved_email_field = ttk.Frame(fields_row)
+        drive_saved_email_field.grid(row=0, column=2, sticky="ew")
+        ttk.Label(drive_saved_email_field, text="Correo guardado:").pack(anchor="w")
+        self.drive_saved_email_frame = ttk.Frame(drive_saved_email_field)
+        self.drive_saved_email_frame.pack(fill="x")
         self.drive_email_combo = ttk.Combobox(
-            self.drive_email_input_frame,
+            self.drive_saved_email_frame,
             textvariable=self.drive_email_combo_var,
-            width=24,
             state="readonly",
         )
         self.drive_email_combo.bind(self.EVT_COMBO_SELECTED, self.on_drive_email_selected)
         self.drive_email_combo_visible = False
         self.refresh_drive_email_selector()
 
-        self.drive_run_button = ttk.Button(form, text="Generar listado Drive", command=self.start_drive_report)
+        self.drive_run_button = ttk.Button(actions_row, text="Procesar Drive", command=self.start_drive_report)
         self.drive_run_button.pack(side="left")
-        self.drive_stop_button = ttk.Button(form, text="Detener", command=self.stop_drive_report, state="disabled")
+        self.drive_load_button = ttk.Button(
+            actions_row,
+            text="Cargar existente",
+            command=self.load_existing_drive_report,
+        )
+        self.drive_load_button.pack(side="left", padx=(8, 0))
+        self.drive_stop_button = ttk.Button(actions_row, text="Detener", command=self.stop_drive_report, state="disabled")
         self.drive_stop_button.pack(side="left", padx=(8, 0))
-        self.drive_open_button = ttk.Button(form, text="Abrir último Drive", command=self.open_last_drive_report)
-        self.drive_open_button.pack(side="left", padx=(8, 0))
 
         ttk.Label(parent, text="Estado Drive:").pack(anchor="w")
         self.drive_log_box = ScrolledText(parent, height=8, wrap="word", state="disabled")
@@ -205,17 +251,20 @@ class GmailReportApp:
     def set_running(self, running):
         if running:
             self.run_button.configure(state="disabled")
+            self.load_existing_button.configure(state="disabled")
             self.stop_button.configure(state="normal")
             self.set_mail_email_input_state("disabled")
             self.mail_provider_combo.configure(state="disabled")
         else:
             self.run_button.configure(state="normal")
+            self.load_existing_button.configure(state="normal")
             self.stop_button.configure(state="disabled")
             self.set_mail_email_input_state("normal")
             self.mail_provider_combo.configure(state="readonly")
 
     def on_provider_change(self, _event=None):
         provider = self.mail_provider_var.get()
+        self.refresh_mail_email_selector()
         if provider == "Outlook":
             self.append_log("ℹ️ Proveedor seleccionado: Outlook")
         else:
@@ -264,12 +313,19 @@ class GmailReportApp:
 
     def _collect_emails_from_prefixed_files(self, pattern_prefix_pairs):
         emails = set()
-        for pattern, prefix in pattern_prefix_pairs:
+        for item in pattern_prefix_pairs:
+            if len(item) == 3:
+                pattern, prefix, excluded_prefixes = item
+            else:
+                pattern, prefix = item
+                excluded_prefixes = ()
             for path in glob(pattern):
                 name = os.path.basename(path)
                 if not (name.endswith(".txt") or name.endswith(".csv")):
                     continue
                 if not name.startswith(prefix):
+                    continue
+                if excluded_prefixes and any(name.startswith(excluded) for excluded in excluded_prefixes):
                     continue
                 safe = name[len(prefix):name.rfind(".")]
                 guessed = self._safe_to_email(safe)
@@ -281,10 +337,11 @@ class GmailReportApp:
     def _safe_to_email(safe_key):
         return GmailReportApp._guess_email_from_safe_key(safe_key)
 
-    def get_previous_mail_emails(self):
+    def get_previous_mail_emails(self, provider=None):
+        provider = provider or self.mail_provider_var.get()
         emails = set()
 
-        if os.path.exists(self.GMAIL_SCAN_STATE_FILE):
+        if provider == "Gmail" and os.path.exists(self.GMAIL_SCAN_STATE_FILE):
             try:
                 with open(self.GMAIL_SCAN_STATE_FILE, "r", encoding="utf-8") as f:
                     state = json.load(f)
@@ -294,15 +351,20 @@ class GmailReportApp:
             except Exception:
                 pass
 
-        emails.update(self._collect_emails_from_token_patterns(["token_outlook_*.json"]))
-        emails.update(
-            self._collect_emails_from_prefixed_files(
-                [
-                    ("detalle_correos_*.txt", "detalle_correos_"),
-                    ("detalle_correos_outlook_*.txt", "detalle_correos_outlook_"),
-                ]
+        if provider == "Outlook":
+            emails.update(self._collect_emails_from_token_patterns(["token_outlook_*.json"]))
+            emails.update(
+                self._collect_emails_from_prefixed_files(
+                    [("detalle_correos_outlook_*.txt", "detalle_correos_outlook_")]
+                )
             )
-        )
+        else:
+            emails.update(self._collect_emails_from_token_patterns(["token_gmail_*.json"]))
+            emails.update(
+                self._collect_emails_from_prefixed_files(
+                    [("detalle_correos_*.txt", "detalle_correos_", ("detalle_correos_outlook_",))]
+                )
+            )
 
         return sorted(emails)
 
@@ -322,26 +384,22 @@ class GmailReportApp:
 
     def refresh_mail_email_selector(self):
         current = self.email_var.get().strip()
-        previous = self.get_previous_mail_emails()
+        previous = self.get_previous_mail_emails(self.mail_provider_var.get())
 
         self.email_combo.pack_forget()
         self.mail_email_combo_visible = False
 
         if previous:
             self.email_combo.configure(values=previous, state="readonly")
-            self.email_combo.pack(side="left", padx=(6, 0))
+            self.email_combo.pack(fill="x")
             self.mail_email_combo_visible = True
             if current in previous:
                 self.mail_email_combo_var.set(current)
-            elif not current:
+            else:
                 self.email_var.set(previous[0])
                 self.mail_email_combo_var.set(previous[0])
-            else:
-                self.mail_email_combo_var.set("")
         else:
             self.mail_email_combo_var.set("")
-            if current:
-                self.email_var.set(current)
 
     def refresh_drive_email_selector(self):
         current = self.drive_email_var.get().strip()
@@ -353,7 +411,7 @@ class GmailReportApp:
 
         if previous:
             self.drive_email_combo.configure(values=previous, state="readonly")
-            self.drive_email_combo.pack(side="left", padx=(6, 0))
+            self.drive_email_combo.pack(fill="x")
             self.drive_email_combo_visible = True
             if current in previous:
                 self.drive_email_combo_var.set(current)
@@ -403,6 +461,24 @@ class GmailReportApp:
                 f"resumen_extensiones_onedrive_{safe}.txt",
             ]
         return [f"drive_archivos_{safe}.csv", f"resumen_extensiones_{safe}.txt"]
+
+    @staticmethod
+    def get_mail_output_files(email, provider):
+        if provider == "Outlook":
+            report_files = get_outlook_report_files(email)
+        else:
+            report_files = get_gmail_report_files(email)
+        return [report_files["detail"], report_files["domain"]]
+
+    def build_existing_mail_summary(self, email, provider, files):
+        detail_path = next((path for path in files if os.path.basename(path).startswith("detalle_correos")), None)
+        detail = parse_detail_summary(detail_path) if detail_path and os.path.exists(detail_path) else {}
+        last_scan = get_gmail_last_scan(email) if provider == "Gmail" else None
+        return {
+            "source": "cache",
+            "last_scan": last_scan,
+            "detail": detail,
+        }
 
     def set_summary(self, summary):
         source_tag = None
@@ -936,14 +1012,14 @@ class GmailReportApp:
     def set_drive_running(self, running):
         if running:
             self.drive_run_button.configure(state="disabled")
+            self.drive_load_button.configure(state="disabled")
             self.drive_stop_button.configure(state="normal")
-            self.drive_open_button.configure(state="disabled")
             self.set_drive_email_input_state("disabled")
             self.drive_provider_combo.configure(state="disabled")
         else:
             self.drive_run_button.configure(state="normal")
+            self.drive_load_button.configure(state="normal")
             self.drive_stop_button.configure(state="disabled")
-            self.drive_open_button.configure(state="normal")
             self.set_drive_email_input_state("normal")
             self.drive_provider_combo.configure(state="readonly")
 
@@ -957,7 +1033,7 @@ class GmailReportApp:
             self.drive_stop_event.set()
             self.append_drive_log("⏹ Solicitud de detención enviada. Esperando punto seguro de cancelación...")
 
-    def open_last_drive_report(self):
+    def load_existing_drive_report(self):
         drive_email = self.drive_email_var.get().strip()
         if not drive_email:
             messagebox.showwarning(self.REQUIRED_EMAIL_TITLE, "Ingresa el correo para Drive.")
@@ -971,6 +1047,27 @@ class GmailReportApp:
 
         self.render_drive_tabs(files)
         self.append_drive_log(f"ℹ️ Se cargaron los últimos archivos de {self.drive_provider_var.get()} sin reescanear.")
+
+    def load_existing_mail_report(self):
+        email = self.email_var.get().strip()
+        provider = self.mail_provider_var.get()
+        if not email:
+            messagebox.showwarning(self.REQUIRED_EMAIL_TITLE, f"Ingresa el correo {provider} a cargar.")
+            return
+
+        files = self.get_mail_output_files(email, provider)
+        existing = [path for path in files if os.path.exists(path)]
+        if not existing:
+            self.append_log(f"⚠️ No hay reportes previos de {provider} para {email}.")
+            return
+
+        self.log_box.configure(state="normal")
+        self.log_box.delete("1.0", "end")
+        self.log_box.configure(state="disabled")
+        self.clear_tabs()
+        self.build_tabs(files)
+        self.set_summary(self.build_existing_mail_summary(email, provider, files))
+        self.append_log(f"ℹ️ Se cargaron los últimos archivos de {provider} sin reprocesar.")
 
     def run_drive_report(self, drive_email, provider):
         try:
@@ -1021,7 +1118,7 @@ class GmailReportApp:
             if provider == "Outlook":
                 result = process_outlook(user_email=email, log=emit, stop_event=self.mail_stop_event)
             else:
-                result = process_gmail(user_email=email, log=emit, stop_event=self.mail_stop_event)
+                result = process_gmail(user_email=email, log=emit, stop_event=self.mail_stop_event, force_refresh=True)
             self.events.put(("done", result))
         except Exception as exc:
             message = str(exc)
