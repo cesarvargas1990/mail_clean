@@ -439,6 +439,19 @@ class GmailReportApp:
         for tab_id in self.drive_notebook.tabs():
             self.drive_notebook.forget(tab_id)
 
+    def reset_mail_panel_state(self):
+        self.log_box.configure(state="normal")
+        self.log_box.delete("1.0", "end")
+        self.log_box.configure(state="disabled")
+        self.set_summary(None)
+        self.clear_tabs()
+
+    def reset_drive_panel_state(self):
+        self.drive_log_box.configure(state="normal")
+        self.drive_log_box.delete("1.0", "end")
+        self.drive_log_box.configure(state="disabled")
+        self.clear_drive_tabs()
+
     @staticmethod
     def safe_key(email):
         email = (email or "").strip().lower()
@@ -1086,10 +1099,7 @@ class GmailReportApp:
         if reauth_choice is None:
             return
 
-        self.drive_log_box.configure(state="normal")
-        self.drive_log_box.delete("1.0", "end")
-        self.drive_log_box.configure(state="disabled")
-        self.clear_drive_tabs()
+        self.reset_drive_panel_state()
         self.drive_stop_event.clear()
         self.set_drive_running(True)
         self.append_drive_log(f"▶️ Iniciando análisis de {provider} para: {drive_email}")
@@ -1213,11 +1223,7 @@ class GmailReportApp:
         if reauth_choice is None:
             return
 
-        self.log_box.configure(state="normal")
-        self.log_box.delete("1.0", "end")
-        self.log_box.configure(state="disabled")
-        self.set_summary(None)
-        self.clear_tabs()
+        self.reset_mail_panel_state()
         self.mail_stop_event.clear()
 
         self.append_log(f"▶️ Iniciando análisis {provider} para: {email}")
@@ -1286,7 +1292,7 @@ class GmailReportApp:
 
     def handle_cancelled_event(self, payload):
         self.set_running(False)
-        self.append_log(f"⏹ {payload or self.CANCEL_MESSAGE}")
+        self.reset_mail_panel_state()
 
     def handle_drive_error_event(self, payload):
         self.set_drive_running(False)
@@ -1295,7 +1301,7 @@ class GmailReportApp:
 
     def handle_drive_cancelled_event(self, payload):
         self.set_drive_running(False)
-        self.append_drive_log(f"⏹ {payload or self.CANCEL_MESSAGE}")
+        self.reset_drive_panel_state()
 
     def dispatch_event(self, event, payload):
         if event == "log":
