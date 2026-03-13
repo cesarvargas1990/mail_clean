@@ -683,6 +683,16 @@ class GmailReportApp:
             command=lambda c=column, r=(not reverse): self.sort_tree_column(tree, c, r, original_rows_map),
         )
 
+    def show_file_details(self, row_data, columns):
+        if not row_data:
+            return
+        lines = []
+        for column in columns:
+            label = self.format_column_title(column)
+            value = row_data.get(column, "") or "(vacío)"
+            lines.append(f"{label}: {value}")
+        messagebox.showinfo("Detalles del archivo", "\n".join(lines), parent=self.root)
+
     def add_csv_grid_tab(self, parent_notebook, title, csv_path):
         frame = ttk.Frame(parent_notebook)
         parent_notebook.add(frame, text=title)
@@ -703,15 +713,34 @@ class GmailReportApp:
         search_frame = ttk.Frame(frame)
         search_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         search_frame.grid_columnconfigure(1, weight=1)
+        search_frame.grid_columnconfigure(2, weight=0)
 
         ttk.Label(search_frame, text="Buscar:").grid(row=0, column=0, sticky="w", padx=(0, 8))
         search_var = tk.StringVar()
         search_entry = ttk.Entry(search_frame, textvariable=search_var)
         search_entry.grid(row=0, column=1, sticky="ew")
 
-        tree = ttk.Treeview(frame, columns=columns, show="headings")
-        y_scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
-        x_scroll = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+        current_view = {"mode": "grid"}
+        toggle_view_button = ttk.Button(search_frame, text="Ver como árbol")
+        toggle_view_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
+
+        content_frame = ttk.Frame(frame)
+        content_frame.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        content_frame.grid_rowconfigure(0, weight=1)
+        content_frame.grid_columnconfigure(0, weight=1)
+
+        grid_frame = ttk.Frame(content_frame)
+        browser_frame = ttk.Frame(content_frame)
+        grid_frame.grid(row=0, column=0, sticky="nsew")
+        browser_frame.grid(row=0, column=0, sticky="nsew")
+        grid_frame.grid_rowconfigure(0, weight=1)
+        grid_frame.grid_columnconfigure(0, weight=1)
+        browser_frame.grid_rowconfigure(0, weight=1)
+        browser_frame.grid_columnconfigure(0, weight=1)
+
+        tree = ttk.Treeview(grid_frame, columns=columns, show="headings")
+        y_scroll = ttk.Scrollbar(grid_frame, orient="vertical", command=tree.yview)
+        x_scroll = ttk.Scrollbar(grid_frame, orient="horizontal", command=tree.xview)
         tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
 
         for col in columns:
@@ -723,16 +752,34 @@ class GmailReportApp:
             )
             tree.column(col, width=120, anchor="w", stretch=False)
 
-        tree.grid(row=1, column=0, sticky="nsew")
-        y_scroll.grid(row=1, column=1, sticky="ns")
-        x_scroll.grid(row=2, column=0, sticky="ew")
+        tree.grid(row=0, column=0, sticky="nsew")
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
 
-        view_link, download_link = self.build_link_frame(frame, row=3)
+        browser_columns = ("size_human", "modified_at")
+        browser_tree = ttk.Treeview(browser_frame, columns=browser_columns, show="tree headings")
+        browser_y_scroll = ttk.Scrollbar(browser_frame, orient="vertical", command=browser_tree.yview)
+        browser_x_scroll = ttk.Scrollbar(browser_frame, orient="horizontal", command=browser_tree.xview)
+        browser_tree.configure(yscrollcommand=browser_y_scroll.set, xscrollcommand=browser_x_scroll.set)
+        browser_tree.heading("#0", text="Explorador")
+        browser_tree.column("#0", width=360, anchor="w", stretch=True)
+        browser_tree.heading("size_human", text="Tamaño")
+        browser_tree.column("size_human", width=140, anchor="w", stretch=False)
+        browser_tree.heading("modified_at", text="Fecha")
+        browser_tree.column("modified_at", width=180, anchor="w", stretch=False)
+        browser_tree.tag_configure("folder", foreground="#B07A00")
+        browser_tree.tag_configure("file", foreground="#1A5FB4")
+        browser_tree.grid(row=0, column=0, sticky="nsew")
+        browser_y_scroll.grid(row=0, column=1, sticky="ns")
+        browser_x_scroll.grid(row=1, column=0, sticky="ew")
+
+        view_link, download_link = self.build_link_frame(frame, row=2)
 
         frame.grid_rowconfigure(1, weight=1)
         frame.grid_columnconfigure(0, weight=1)
 
         original_rows_map = {}
+        browser_rows_map = {}
         all_row_data = []
         for idx, row in enumerate(display_rows):
             all_row_data.append(
@@ -751,7 +798,7 @@ class GmailReportApp:
                     writer.writerow([row_info["original_values"].get(col, "") for col in columns])
 
         def fit_columns(_event=None):
-            self.fit_tree_columns(tree, frame, columns, column_weights)
+            self.fit_tree_columns(tree, grid_frame, columns, column_weights)
 
         def clear_link_labels():
             self.set_link_widget(view_link, "", "")
@@ -783,6 +830,62 @@ class GmailReportApp:
 
             fit_columns()
 
+        def populate_browser(filtered_rows):
+            selected_file_id = None
+            selected = browser_tree.selection()
+            if selected:
+                selected_file_id = (browser_rows_map.get(selected[0], {}) or {}).get("file_id")
+
+            browser_rows_map.clear()
+            for item_id in browser_tree.get_children():
+                browser_tree.delete(item_id)
+
+            folder_nodes = {}
+            sorted_rows = sorted(filtered_rows, key=lambda row: row["original_values"].get("full_path", "").lower())
+
+            for row_info in sorted_rows:
+                row_data = row_info["original_values"]
+                full_path = row_data.get("full_path", "")
+                clean_path = full_path.strip("/")
+                if not clean_path:
+                    continue
+
+                parts = [part for part in clean_path.split("/") if part]
+                folder_parts = parts[:-1]
+                file_name = parts[-1]
+                parent_id = ""
+                folder_key = ""
+
+                for folder_name in folder_parts:
+                    folder_key = f"{folder_key}/{folder_name}" if folder_key else folder_name
+                    if folder_key not in folder_nodes:
+                        folder_nodes[folder_key] = browser_tree.insert(
+                            parent_id,
+                            "end",
+                            text=f"📁 {folder_name}",
+                            values=("", ""),
+                            open=False,
+                            tags=("folder",),
+                        )
+                    parent_id = folder_nodes[folder_key]
+
+                item_id = browser_tree.insert(
+                    parent_id,
+                    "end",
+                    text=f"📄 {file_name}",
+                    values=(row_data.get("size_human", ""), row_data.get("modified_at", "")),
+                    tags=("file",),
+                )
+                browser_rows_map[item_id] = row_data
+
+                if selected_file_id and row_data.get("file_id") == selected_file_id:
+                    browser_tree.selection_set(item_id)
+                    browser_tree.focus(item_id)
+                    browser_tree.see(item_id)
+
+            if not browser_tree.selection():
+                clear_link_labels()
+
         def apply_filter(*_args):
             search_term = search_var.get().strip().lower()
             if not search_term:
@@ -790,12 +893,19 @@ class GmailReportApp:
             else:
                 filtered_rows = [row for row in all_row_data if search_term in row["search_blob"]]
             populate_tree(filtered_rows)
+            populate_browser(filtered_rows)
+
+        def get_active_widget():
+            return browser_tree if current_view["mode"] == "browser" else tree
 
         def get_selected_row_data():
-            selected = tree.selection()
+            active_widget = get_active_widget()
+            selected = active_widget.selection()
             if not selected:
                 return None
-            return original_rows_map.get(selected[0], {})
+            if active_widget is tree:
+                return original_rows_map.get(selected[0], {})
+            return browser_rows_map.get(selected[0], {})
 
         def update_row_info_after_rename(row_info, new_name):
             row_info["original_values"]["full_path"] = self.replace_file_name_in_path(
@@ -925,37 +1035,76 @@ class GmailReportApp:
             region = tree.identify_region(event.x, event.y)
             tree.configure(cursor="hand2" if region == "heading" else "")
 
-        def reset_cursor(_event=None):
+        def reset_grid_cursor(_event=None):
             tree.configure(cursor="")
+
+        def show_details_selected_file():
+            row_data = get_selected_row_data()
+            if not row_data:
+                return
+            self.show_file_details(row_data, columns)
+
+        def fit_browser_columns(_event=None):
+            total_width = max(browser_tree.winfo_width(), browser_frame.winfo_width()) - 24
+            if total_width <= 0:
+                return
+            browser_tree.column("#0", width=max(260, int(total_width * 0.5)))
+            browser_tree.column("size_human", width=max(120, int(total_width * 0.18)))
+            browser_tree.column("modified_at", width=max(160, int(total_width * 0.25)))
+
+        def set_view(mode):
+            current_view["mode"] = mode
+            if mode == "browser":
+                browser_frame.tkraise()
+                toggle_view_button.configure(text="Ver como grilla")
+            else:
+                grid_frame.tkraise()
+                toggle_view_button.configure(text="Ver como árbol")
+            on_select()
+
+        def toggle_view():
+            set_view("browser" if current_view["mode"] == "grid" else "grid")
 
         context_menu = tk.Menu(tree, tearoff=0)
         context_menu.add_command(label="Abrir", command=view_selected_file)
         context_menu.add_command(label="Descargar", command=download_selected_file)
+        context_menu.add_command(label="Detalles", command=show_details_selected_file)
         context_menu.add_command(label="Renombrar", command=rename_selected_file)
         context_menu.add_separator()
         context_menu.add_command(label="Eliminar", command=delete_selected_file)
 
-        def show_context_menu(event):
-            item_id = tree.identify_row(event.y)
+        def show_context_menu(widget, event):
+            item_id = widget.identify_row(event.y)
             if not item_id:
                 return
-            tree.selection_set(item_id)
-            tree.focus(item_id)
+            widget.selection_set(item_id)
+            widget.focus(item_id)
             on_select()
+            if not get_selected_row_data():
+                return
             context_menu.tk_popup(event.x_root, event.y_root)
             context_menu.grab_release()
 
+        toggle_view_button.configure(command=toggle_view)
         tree.bind("<<TreeviewSelect>>", on_select)
+        browser_tree.bind("<<TreeviewSelect>>", on_select)
         tree.bind("<Double-1>", open_selected_link)
-        tree.bind("<Button-2>", show_context_menu)
-        tree.bind("<Button-3>", show_context_menu)
-        tree.bind("<Control-1>", show_context_menu)
+        browser_tree.bind("<Double-1>", open_selected_link)
+        tree.bind("<Button-2>", lambda event: show_context_menu(tree, event))
+        tree.bind("<Button-3>", lambda event: show_context_menu(tree, event))
+        tree.bind("<Control-1>", lambda event: show_context_menu(tree, event))
+        browser_tree.bind("<Button-2>", lambda event: show_context_menu(browser_tree, event))
+        browser_tree.bind("<Button-3>", lambda event: show_context_menu(browser_tree, event))
+        browser_tree.bind("<Control-1>", lambda event: show_context_menu(browser_tree, event))
         tree.bind("<Configure>", fit_columns)
+        browser_tree.bind("<Configure>", fit_browser_columns)
         tree.bind("<Motion>", update_heading_cursor)
-        tree.bind("<Leave>", reset_cursor)
+        tree.bind("<Leave>", reset_grid_cursor)
         frame.bind("<Configure>", fit_columns)
         search_var.trace_add("write", apply_filter)
         populate_tree(all_row_data)
+        populate_browser(all_row_data)
+        set_view("grid")
 
     def enable_clickable_links(self, text_widget, full_text):
         for idx, match in enumerate(self.URL_PATTERN.finditer(full_text)):
