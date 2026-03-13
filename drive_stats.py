@@ -9,7 +9,8 @@ from google.auth.transport.requests import Request
 DRIVE_READ_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 DRIVE_WRITE_SCOPES = ["https://www.googleapis.com/auth/drive"]
 CREDENTIAL_CANDIDATES = ["credentials.json", "client_secret.json"]
-DEFAULT_DRIVE_TOKEN_FILE = "token_drive.json"
+DEFAULT_DRIVE_TOKEN_FILE = "token_google_drive.json"
+LEGACY_DEFAULT_DRIVE_TOKEN_FILE = "token_drive.json"
 CANCEL_MESSAGE = "Operación cancelada por el usuario."
 
 
@@ -35,6 +36,14 @@ def _safe_drive_token_file(user_email):
     if user_key == "me":
         return DEFAULT_DRIVE_TOKEN_FILE
     clean = "".join(c if c.isalnum() else "_" for c in user_key)
+    return f"token_google_drive_{clean}.json"
+
+
+def _legacy_drive_token_file(user_email):
+    user_key = _safe_user_key(user_email)
+    if user_key == "me":
+        return LEGACY_DEFAULT_DRIVE_TOKEN_FILE
+    clean = "".join(c if c.isalnum() else "_" for c in user_key)
     return f"token_drive_{clean}.json"
 
 
@@ -47,9 +56,9 @@ def _safe_drive_csv_file(user_email):
 
 
 def remove_drive_token(user_email):
-    token_path = _safe_drive_token_file(user_email)
-    if os.path.exists(token_path):
-        os.remove(token_path)
+    for token_path in (_safe_drive_token_file(user_email), _legacy_drive_token_file(user_email)):
+        if os.path.exists(token_path):
+            os.remove(token_path)
 
 
 def human_size(num_bytes):
@@ -67,12 +76,25 @@ def human_size(num_bytes):
     return f"{gb:.2f} GB"
 
 
-def load_drive_credentials(token_path, scopes):
+def load_drive_credentials(token_path, scopes, allow_fallback=True):
     if os.path.exists(token_path):
         return Credentials.from_authorized_user_file(token_path, scopes)
 
+    if not allow_fallback:
+        return None
+
+    legacy_token_path = LEGACY_DEFAULT_DRIVE_TOKEN_FILE
+    if token_path != DEFAULT_DRIVE_TOKEN_FILE:
+        legacy_token_path = token_path.replace("token_google_drive_", "token_drive_")
+
+    if os.path.exists(legacy_token_path):
+        return Credentials.from_authorized_user_file(legacy_token_path, scopes)
+
     if token_path != DEFAULT_DRIVE_TOKEN_FILE and os.path.exists(DEFAULT_DRIVE_TOKEN_FILE):
         return Credentials.from_authorized_user_file(DEFAULT_DRIVE_TOKEN_FILE, scopes)
+
+    if token_path != DEFAULT_DRIVE_TOKEN_FILE and os.path.exists(LEGACY_DEFAULT_DRIVE_TOKEN_FILE):
+        return Credentials.from_authorized_user_file(LEGACY_DEFAULT_DRIVE_TOKEN_FILE, scopes)
 
     return None
 
@@ -108,7 +130,7 @@ def get_service(user_email=None, stop_event=None, scopes=None, force_reauth=Fals
     token_path = _safe_drive_token_file(user_email)
     if force_reauth:
         remove_drive_token(user_email)
-    creds = load_drive_credentials(token_path, scopes)
+    creds = load_drive_credentials(token_path, scopes, allow_fallback=(not force_reauth))
 
     if not creds or not creds.valid:
         ensure_not_cancelled(stop_event)

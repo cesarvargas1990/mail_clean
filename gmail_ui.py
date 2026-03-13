@@ -844,7 +844,7 @@ class GmailReportApp:
             tree.configure(cursor="")
 
         context_menu = tk.Menu(tree, tearoff=0)
-        context_menu.add_command(label="Visualizar", command=view_selected_file)
+        context_menu.add_command(label="Abrir", command=view_selected_file)
         context_menu.add_command(label="Descargar", command=download_selected_file)
         context_menu.add_separator()
         context_menu.add_command(label="Eliminar", command=delete_selected_file)
@@ -861,7 +861,9 @@ class GmailReportApp:
 
         tree.bind("<<TreeviewSelect>>", on_select)
         tree.bind("<Double-1>", open_selected_link)
+        tree.bind("<Button-2>", show_context_menu)
         tree.bind("<Button-3>", show_context_menu)
+        tree.bind("<Control-1>", show_context_menu)
         tree.bind("<Configure>", fit_columns)
         tree.bind("<Motion>", update_heading_cursor)
         tree.bind("<Leave>", reset_cursor)

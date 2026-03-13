@@ -1,10 +1,11 @@
 import os
 import time
-import webbrowser
 from collections import defaultdict
 
 import requests
 from msal import PublicClientApplication
+
+from auth_browser import open_url_in_private_window
 
 # ==== CONFIG ====
 
@@ -88,9 +89,10 @@ def ensure_not_cancelled(stop_event=None):
 
 def open_auth_url(url, log=print):
     try:
-        webbrowser.open(url)
         logger = log if callable(log) else print
-        logger(f"🌐 Abriendo navegador: {url}")
+        opened = open_url_in_private_window(url)
+        mode = "en ventana privada" if opened == "private" else "en navegador del sistema"
+        logger(f"🌐 Abriendo navegador {mode}: {url}")
     except Exception:
         pass
 

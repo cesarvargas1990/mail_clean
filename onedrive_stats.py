@@ -1,9 +1,10 @@
 import os
-import webbrowser
 from glob import glob
 
 import requests
 import msal
+
+from auth_browser import open_url_in_private_window
 
 TENANT_ID = "common"
 CLIENT_ID = "537b2720-a1e6-4f38-804f-241ec44f5163"
@@ -34,6 +35,10 @@ def _safe_output_file(user_email):
         return "onedrive_archivos.csv"
     clean = "".join(c if c.isalnum() else "_" for c in user_key)
     return f"onedrive_archivos_{clean}.csv"
+
+
+def _normalize_email(value):
+    return (value or "").strip().lower()
 
 
 def remove_onedrive_token(user_email):
@@ -73,10 +78,55 @@ def ensure_not_cancelled(stop_event=None):
 def open_auth_url(log=print):
     url = "https://www.microsoft.com/link"
     try:
-        webbrowser.open(url)
-        log(f"🌐 Abriendo navegador: {url}")
+        opened = open_url_in_private_window(url)
+        mode = "en ventana privada" if opened == "private" else "en navegador del sistema"
+        log(f"🌐 Abriendo navegador {mode}: {url}")
     except Exception:
         pass
+
+
+def find_matching_account(accounts, user_email):
+    expected = _normalize_email(user_email)
+    if not expected:
+        return accounts[0] if accounts else None
+
+    for account in accounts:
+        username = _normalize_email(account.get("username"))
+        if username == expected:
+            return account
+
+    return None
+
+
+def extract_token_username(result):
+    claims = result.get("id_token_claims", {}) if isinstance(result, dict) else {}
+    return _normalize_email(
+        claims.get("preferred_username")
+        or claims.get("email")
+        or claims.get("upn")
+    )
+
+
+def validate_token_user(access_token, expected_email):
+    expected = _normalize_email(expected_email)
+    if not expected:
+        return
+
+    resp = requests.get(
+        "https://graph.microsoft.com/v1.0/me?$select=userPrincipalName,mail",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"No se pudo validar la cuenta de OneDrive: {resp.status_code} {resp.text}")
+
+    data = resp.json()
+    actual = _normalize_email(data.get("userPrincipalName") or data.get("mail"))
+    if actual and actual != expected:
+        raise RuntimeError(
+            f"La cuenta autenticada en OneDrive es {actual}, pero solicitaste {expected}. "
+            "Vuelve a procesar y elige regenerar credenciales si necesitas cambiar de cuenta."
+        )
 
 
 def get_access_token(user_email=None, log=print, stop_event=None, force_reauth=False):
@@ -97,8 +147,9 @@ def get_access_token(user_email=None, log=print, stop_event=None, force_reauth=F
 
     accounts = app.get_accounts()
     result = None
-    if accounts:
-        result = app.acquire_token_silent(SCOPES, account=accounts[0])
+    matching_account = find_matching_account(accounts, user_email)
+    if matching_account:
+        result = app.acquire_token_silent(SCOPES, account=matching_account)
 
     ensure_not_cancelled(stop_event)
 
@@ -109,18 +160,33 @@ def get_access_token(user_email=None, log=print, stop_event=None, force_reauth=F
 
         log("🔐 Autenticación necesaria para OneDrive:")
         log(flow.get("message", ""))
+        log(
+            "Si Microsoft propone otra cuenta por defecto, "
+            "abre el enlace en una ventana privada o cambia de cuenta manualmente allí."
+        )
         log("(Ingresa el código, acepta permisos y vuelve a esta ventana.)")
         open_auth_url(log=log)
 
         result = app.acquire_token_by_device_flow(flow)
+
         if "access_token" not in result:
             raise RuntimeError(f"Error obteniendo token OneDrive: {result}")
+
+        token_username = extract_token_username(result)
+        expected = _normalize_email(user_email)
+        if expected and token_username and token_username != expected:
+            raise RuntimeError(
+                f"Se autenticó la cuenta {token_username}, pero solicitaste {expected}. "
+                "Reintenta con la cuenta correcta."
+            )
 
     if cache.has_state_changed:
         with open(token_path, "w", encoding="utf-8") as f:
             f.write(cache.serialize())
 
-    return result["access_token"]
+    access_token = result["access_token"]
+    validate_token_user(access_token, user_email)
+    return access_token
 
 
 def list_onedrive(user_email=None, log=print, stop_event=None, force_reauth=False):
