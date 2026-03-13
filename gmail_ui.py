@@ -9,7 +9,7 @@ import webbrowser
 from glob import glob
 from contextlib import redirect_stdout
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from tkinter.scrolledtext import ScrolledText
 
 from gmail_stats import (
@@ -20,9 +20,9 @@ from gmail_stats import (
 )
 from outlook_stats import get_report_files as get_outlook_report_files
 from outlook_stats import process as process_outlook
-from drive_stats import list_drive, delete_drive_file
+from drive_stats import list_drive, delete_drive_file, rename_drive_file
 from drive_stats2 import process_extensions
-from onedrive_stats import list_onedrive, delete_onedrive_file
+from onedrive_stats import list_onedrive, delete_onedrive_file, rename_onedrive_file
 
 
 class GmailReportApp:
@@ -545,17 +545,19 @@ class GmailReportApp:
         for idx, row in enumerate(data_rows):
             normalized = (row + [""] * (len(columns) - len(row)))[:len(columns)]
             row_map = dict(zip(columns, normalized))
-
-            display_map = dict(row_map)
-            if "view_url" in display_map:
-                display_map["view_url"] = "🔗 Abrir"
-            if "download_url" in display_map:
-                display_map["download_url"] = "⬇ Descargar"
-
-            display_rows.append([display_map.get(col, "") for col in columns])
+            display_rows.append(GmailReportApp.build_display_row(columns, row_map))
             original_map[idx] = row_map
 
         return display_rows, original_map
+
+    @staticmethod
+    def build_display_row(columns, row_map):
+        display_map = dict(row_map)
+        if "view_url" in display_map:
+            display_map["view_url"] = "🔗 Abrir"
+        if "download_url" in display_map:
+            display_map["download_url"] = "⬇ Descargar"
+        return [display_map.get(col, "") for col in columns]
 
     @staticmethod
     def get_column_weights(columns):
@@ -612,6 +614,21 @@ class GmailReportApp:
     @staticmethod
     def format_column_title(column_name):
         return " ".join(part.capitalize() for part in column_name.split("_"))
+
+    @staticmethod
+    def extract_extension(file_name):
+        return file_name.split(".")[-1].lower() if "." in file_name else "sin_extension"
+
+    @staticmethod
+    def replace_file_name_in_path(full_path, new_name):
+        if not full_path:
+            return new_name
+        if "/" not in full_path:
+            return new_name
+        parent = full_path.rsplit("/", 1)[0]
+        if not parent:
+            return f"/{new_name}"
+        return f"{parent}/{new_name}"
 
     @staticmethod
     def infer_numeric_column(tree, column, original_rows_map):
@@ -769,6 +786,15 @@ class GmailReportApp:
                 return None
             return original_rows_map.get(selected[0], {})
 
+        def update_row_info_after_rename(row_info, new_name):
+            row_info["original_values"]["full_path"] = self.replace_file_name_in_path(
+                row_info["original_values"].get("full_path", ""),
+                new_name,
+            )
+            row_info["original_values"]["ext"] = self.extract_extension(new_name)
+            row_info["display_values"] = self.build_display_row(columns, row_info["original_values"])
+            row_info["search_blob"] = " ".join(value.lower() for value in row_info["display_values"] if value)
+
         def on_select(_event=None):
             row_data = get_selected_row_data()
             if not row_data:
@@ -836,6 +862,54 @@ class GmailReportApp:
             except Exception as exc:
                 messagebox.showerror("Eliminar archivo", str(exc))
 
+        def rename_selected_file():
+            row_data = get_selected_row_data()
+            if not row_data:
+                return
+
+            file_id = row_data.get("file_id", "")
+            if not file_id:
+                messagebox.showerror("Renombrar archivo", "No se encontró el identificador del archivo.")
+                return
+
+            current_path = row_data.get("full_path", "")
+            current_name = current_path.rsplit("/", 1)[-1] if current_path else ""
+            new_name = simpledialog.askstring(
+                "Renombrar archivo",
+                "Nuevo nombre del archivo:",
+                initialvalue=current_name,
+                parent=self.root,
+            )
+            if new_name is None:
+                return
+
+            new_name = new_name.strip()
+            if not new_name:
+                messagebox.showwarning("Renombrar archivo", "El nombre nuevo no puede estar vacío.")
+                return
+
+            if new_name == current_name:
+                return
+
+            try:
+                provider = self.drive_provider_var.get()
+                drive_email = self.drive_email_var.get().strip() or None
+                if provider == "OneDrive":
+                    rename_onedrive_file(file_id, new_name, drive_email)
+                else:
+                    rename_drive_file(file_id, new_name, drive_email)
+
+                for row_info in all_row_data:
+                    if row_info["original_values"].get("file_id") == file_id:
+                        update_row_info_after_rename(row_info, new_name)
+                        break
+
+                persist_rows()
+                apply_filter()
+                self.append_drive_log(f"✏️ Archivo renombrado: {current_name} -> {new_name}")
+            except Exception as exc:
+                messagebox.showerror("Renombrar archivo", str(exc))
+
         def update_heading_cursor(event):
             region = tree.identify_region(event.x, event.y)
             tree.configure(cursor="hand2" if region == "heading" else "")
@@ -846,6 +920,7 @@ class GmailReportApp:
         context_menu = tk.Menu(tree, tearoff=0)
         context_menu.add_command(label="Abrir", command=view_selected_file)
         context_menu.add_command(label="Descargar", command=download_selected_file)
+        context_menu.add_command(label="Renombrar", command=rename_selected_file)
         context_menu.add_separator()
         context_menu.add_command(label="Eliminar", command=delete_selected_file)
 

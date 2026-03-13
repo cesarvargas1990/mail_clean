@@ -277,5 +277,16 @@ def delete_drive_file(file_id, user_email=None):
     service.files().delete(fileId=file_id).execute()
 
 
+def rename_drive_file(file_id, new_name, user_email=None):
+    if not file_id:
+        raise ValueError("Se requiere file_id para renombrar en Drive.")
+    if not new_name or not new_name.strip():
+        raise ValueError("Se requiere un nombre nuevo para renombrar en Drive.")
+
+    service = get_service(user_email, scopes=DRIVE_WRITE_SCOPES)
+    metadata = {"name": new_name.strip()}
+    service.files().update(fileId=file_id, body=metadata, fields="id,name").execute()
+
+
 if __name__ == "__main__":
     list_drive()
