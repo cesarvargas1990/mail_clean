@@ -220,7 +220,7 @@ def list_drive(user_email=None, stop_event=None, force_reauth=False):
     while True:
         ensure_not_cancelled(stop_event)
         resp = service.files().list(
-            fields="nextPageToken, files(id,name,size,mimeType,parents)",
+            fields="nextPageToken, files(id,name,size,mimeType,parents,modifiedTime)",
             pageSize=1000,
             pageToken=page
         ).execute()
@@ -248,7 +248,7 @@ def list_drive(user_email=None, stop_event=None, force_reauth=False):
 
     # exportar con tamaños humanos
     with open(output_file, "w", encoding="utf-8") as out:
-        out.write("size_bytes;size_human;full_path;ext;file_id;view_url;download_url\n")
+        out.write("size_bytes;size_human;full_path;ext;modified_at;file_id;view_url;download_url\n")
 
         for f in files_sorted:
             size_bytes = f.get("size", "0")
@@ -256,13 +256,14 @@ def list_drive(user_email=None, stop_event=None, force_reauth=False):
 
             name = f.get("name", "")
             ext = name.split(".")[-1].lower() if "." in name else "sin_extension"
+            modified_at = f.get("modifiedTime", "")
             file_id = f.get("id", "")
             full_path = f"{f['path']}/{name}"
             view_url = f"https://drive.google.com/file/d/{file_id}/view"
             download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
 
             out.write(
-                f"{size_bytes};{size_human};{full_path};{ext};{file_id};{view_url};{download_url}\n"
+                f"{size_bytes};{size_human};{full_path};{ext};{modified_at};{file_id};{view_url};{download_url}\n"
             )
 
     print(f"✅ Archivo generado: {output_file}")

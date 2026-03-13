@@ -396,7 +396,6 @@ class GmailReportApp:
             if current in previous:
                 self.mail_email_combo_var.set(current)
             else:
-                self.email_var.set(previous[0])
                 self.mail_email_combo_var.set(previous[0])
         else:
             self.mail_email_combo_var.set("")
@@ -415,15 +414,10 @@ class GmailReportApp:
             self.drive_email_combo_visible = True
             if current in previous:
                 self.drive_email_combo_var.set(current)
-            elif not current:
-                self.drive_email_var.set(previous[0])
-                self.drive_email_combo_var.set(previous[0])
             else:
-                self.drive_email_combo_var.set("")
+                self.drive_email_combo_var.set(previous[0])
         else:
             self.drive_email_combo_var.set("")
-            if current:
-                self.drive_email_var.set(current)
 
     def set_mail_email_input_state(self, state):
         self.email_entry.configure(state=state if state in ("disabled", "normal") else "normal")
@@ -565,6 +559,8 @@ class GmailReportApp:
         for col in columns:
             if col == "full_path":
                 weights[col] = 4
+            elif col == "modified_at":
+                weights[col] = 2
             elif col in ("view_url", "download_url"):
                 weights[col] = 2
             else:
@@ -613,6 +609,8 @@ class GmailReportApp:
 
     @staticmethod
     def format_column_title(column_name):
+        if column_name == "modified_at":
+            return "Fecha"
         return " ".join(part.capitalize() for part in column_name.split("_"))
 
     @staticmethod

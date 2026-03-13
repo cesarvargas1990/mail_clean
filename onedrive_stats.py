@@ -225,13 +225,14 @@ def list_onedrive(user_email=None, log=print, stop_event=None, force_reauth=Fals
     files_sorted = sorted(files, key=lambda x: int(x.get("size", 0)), reverse=True)
 
     with open(output_file, "w", encoding="utf-8") as out:
-        out.write("size_bytes;size_human;full_path;ext;file_id;view_url;download_url\n")
+        out.write("size_bytes;size_human;full_path;ext;modified_at;file_id;view_url;download_url\n")
 
         for item in files_sorted:
             size_bytes = int(item.get("size", 0))
             size_human = human_size(size_bytes)
             name = item.get("name", "")
             ext = name.split(".")[-1].lower() if "." in name else "sin_extension"
+            modified_at = item.get("lastModifiedDateTime", "")
             file_id = item.get("id", "")
             path = item.get("parentReference", {}).get("path", "")
             full_path = f"/{path.replace('/drive/root:', '').lstrip('/')}/{name}".replace("//", "/")
@@ -239,7 +240,7 @@ def list_onedrive(user_email=None, log=print, stop_event=None, force_reauth=Fals
             download_url = item.get("@microsoft.graph.downloadUrl", "")
 
             out.write(
-                f"{size_bytes};{size_human};{full_path};{ext};{file_id};{view_url};{download_url}\n"
+                f"{size_bytes};{size_human};{full_path};{ext};{modified_at};{file_id};{view_url};{download_url}\n"
             )
 
     log(f"✅ Archivo generado: {output_file}")
@@ -257,6 +258,25 @@ def delete_onedrive_file(file_id, user_email=None):
     resp = requests.delete(url, headers=headers, timeout=30)
     if resp.status_code not in (204,):
         raise RuntimeError(f"Error eliminando en OneDrive: {resp.status_code} {resp.text}")
+
+
+def rename_onedrive_file(file_id, new_name, user_email=None):
+    if not file_id:
+        raise ValueError("Se requiere file_id para renombrar en OneDrive.")
+    if not new_name or not new_name.strip():
+        raise ValueError("Se requiere un nombre nuevo para renombrar en OneDrive.")
+
+    token = get_access_token(user_email)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    url = f"https://graph.microsoft.com/v1.0/me/drive/items/{file_id}"
+
+    resp = requests.patch(url, headers=headers, json={"name": new_name.strip()}, timeout=30)
+    if resp.status_code not in (200,):
+        raise RuntimeError(f"Error renombrando en OneDrive: {resp.status_code} {resp.text}")
 
 
 if __name__ == "__main__":
