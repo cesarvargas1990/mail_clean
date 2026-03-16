@@ -1,10 +1,13 @@
 import os
 import json
+import io
+import zipfile
 from glob import glob
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from google.auth.transport.requests import Request
+from googleapiclient.http import MediaIoBaseDownload
 
 DRIVE_READ_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
 DRIVE_WRITE_SCOPES = ["https://www.googleapis.com/auth/drive"]
@@ -12,6 +15,19 @@ CREDENTIAL_CANDIDATES = ["credentials.json", "client_secret.json"]
 DEFAULT_DRIVE_TOKEN_FILE = "token_google_drive.json"
 LEGACY_DEFAULT_DRIVE_TOKEN_FILE = "token_drive.json"
 CANCEL_MESSAGE = "Operación cancelada por el usuario."
+GOOGLE_FOLDER_MIME = "application/vnd.google-apps.folder"
+GOOGLE_EXPORT_MIME_BY_TYPE = {
+    "application/vnd.google-apps.document": ("application/pdf", ".pdf"),
+    "application/vnd.google-apps.spreadsheet": (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".xlsx",
+    ),
+    "application/vnd.google-apps.presentation": (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".pptx",
+    ),
+    "application/vnd.google-apps.drawing": ("image/png", ".png"),
+}
 
 
 def find_client_secrets_file():
@@ -201,6 +217,123 @@ def resolve_path(file, folder_map, cache):
     full_path = "/" + "/".join(reversed(parts))
     cache[file["parents"][0]] = full_path
     return full_path
+
+
+def _escape_drive_query(value):
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def find_drive_folder_by_path(service, folder_path, stop_event=None):
+    clean_path = (folder_path or "").strip().strip("/")
+    if not clean_path:
+        return {"id": "root", "name": "", "path": "/"}
+
+    parent_id = "root"
+    current_path = ""
+
+    for part in [piece for piece in clean_path.split("/") if piece]:
+        ensure_not_cancelled(stop_event)
+        query = (
+            f"'{parent_id}' in parents and trashed = false "
+            f"and mimeType = '{GOOGLE_FOLDER_MIME}' and name = '{_escape_drive_query(part)}'"
+        )
+        resp = service.files().list(
+            q=query,
+            fields="files(id,name)",
+            pageSize=10,
+        ).execute()
+        files = resp.get("files", [])
+        if not files:
+            raise RuntimeError(f"No se encontró la carpeta de Drive: /{clean_path}")
+
+        match = files[0]
+        parent_id = match["id"]
+        current_path = f"{current_path}/{match['name']}" if current_path else f"/{match['name']}"
+
+    return {"id": parent_id, "name": clean_path.split("/")[-1], "path": current_path or "/"}
+
+
+def rename_drive_folder(folder_path, new_name, user_email=None):
+    if not folder_path:
+        raise ValueError("Se requiere la ruta de la carpeta en Drive.")
+    if not new_name or not new_name.strip():
+        raise ValueError("Se requiere un nombre nuevo para renombrar la carpeta en Drive.")
+
+    service = get_service(user_email, scopes=DRIVE_WRITE_SCOPES)
+    folder = find_drive_folder_by_path(service, folder_path)
+    metadata = {"name": new_name.strip()}
+    service.files().update(fileId=folder["id"], body=metadata, fields="id,name").execute()
+
+
+def _download_drive_file_bytes(service, file_id, mime_type, name, stop_event=None):
+    export_info = GOOGLE_EXPORT_MIME_BY_TYPE.get(mime_type)
+    final_name = name
+
+    if export_info:
+        export_mime, suffix = export_info
+        if suffix and not final_name.lower().endswith(suffix):
+            final_name = f"{final_name}{suffix}"
+        request = service.files().export_media(fileId=file_id, mimeType=export_mime)
+    else:
+        request = service.files().get_media(fileId=file_id)
+
+    buffer = io.BytesIO()
+    downloader = MediaIoBaseDownload(buffer, request)
+    done = False
+
+    while not done:
+        ensure_not_cancelled(stop_event)
+        _, done = downloader.next_chunk()
+
+    return final_name, buffer.getvalue()
+
+
+def _write_drive_folder_to_zip(service, folder_id, zip_file, relative_path="", stop_event=None):
+    page = None
+
+    while True:
+        ensure_not_cancelled(stop_event)
+        query = f"'{folder_id}' in parents and trashed = false"
+        resp = service.files().list(
+            q=query,
+            fields="nextPageToken, files(id,name,mimeType)",
+            pageSize=500,
+            pageToken=page,
+        ).execute()
+
+        for item in resp.get("files", []):
+            item_name = item.get("name", "sin_nombre")
+            item_path = f"{relative_path}/{item_name}" if relative_path else item_name
+            if item.get("mimeType") == GOOGLE_FOLDER_MIME:
+                zip_file.writestr(f"{item_path}/", b"")
+                _write_drive_folder_to_zip(service, item["id"], zip_file, item_path, stop_event=stop_event)
+            else:
+                final_name, content = _download_drive_file_bytes(
+                    service,
+                    item["id"],
+                    item.get("mimeType", ""),
+                    item_name,
+                    stop_event=stop_event,
+                )
+                final_path = f"{relative_path}/{final_name}" if relative_path else final_name
+                zip_file.writestr(final_path, content)
+
+        page = resp.get("nextPageToken")
+        if not page:
+            break
+
+
+def download_drive_folder_zip(folder_path, destination_zip, user_email=None, stop_event=None):
+    if not folder_path:
+        raise ValueError("Se requiere la ruta de la carpeta en Drive.")
+    if not destination_zip:
+        raise ValueError("Se requiere la ruta destino del ZIP.")
+
+    service = get_service(user_email, stop_event=stop_event, scopes=DRIVE_READ_SCOPES)
+    folder = find_drive_folder_by_path(service, folder_path, stop_event=stop_event)
+
+    with zipfile.ZipFile(destination_zip, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        _write_drive_folder_to_zip(service, folder["id"], zip_file, folder["name"], stop_event=stop_event)
 
 
 def list_drive(user_email=None, stop_event=None, force_reauth=False):

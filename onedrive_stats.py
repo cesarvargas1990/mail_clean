@@ -1,5 +1,7 @@
 import os
+import zipfile
 from glob import glob
+from urllib.parse import quote
 
 import requests
 import msal
@@ -127,6 +129,86 @@ def validate_token_user(access_token, expected_email):
             f"La cuenta autenticada en OneDrive es {actual}, pero solicitaste {expected}. "
             "Vuelve a procesar y elige regenerar credenciales si necesitas cambiar de cuenta."
         )
+
+
+def _graph_headers(access_token):
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    }
+
+
+def _graph_headers_json(access_token):
+    headers = _graph_headers(access_token)
+    headers["Content-Type"] = "application/json"
+    return headers
+
+
+def get_folder_item_by_path(access_token, folder_path):
+    clean_path = (folder_path or "").strip().strip("/")
+    if not clean_path:
+        resp = requests.get(
+            "https://graph.microsoft.com/v1.0/me/drive/root",
+            headers=_graph_headers(access_token),
+            timeout=30,
+        )
+    else:
+        encoded = quote(clean_path, safe="/")
+        resp = requests.get(
+            f"https://graph.microsoft.com/v1.0/me/drive/root:/{encoded}",
+            headers=_graph_headers(access_token),
+            timeout=30,
+        )
+
+    if resp.status_code != 200:
+        raise RuntimeError(f"No se encontró la carpeta de OneDrive: /{clean_path or ''}")
+
+    data = resp.json()
+    if "folder" not in data:
+        raise RuntimeError(f"La ruta no corresponde a una carpeta en OneDrive: /{clean_path}")
+    return data
+
+
+def _list_folder_children(access_token, item_id, stop_event=None):
+    items = []
+    url = f"https://graph.microsoft.com/v1.0/me/drive/items/{item_id}/children?$top=200"
+
+    while url:
+        ensure_not_cancelled(stop_event)
+        resp = requests.get(url, headers=_graph_headers(access_token), timeout=30)
+        if resp.status_code != 200:
+            raise RuntimeError(f"Error listando carpeta de OneDrive: {resp.status_code} {resp.text}")
+        data = resp.json()
+        items.extend(data.get("value", []))
+        url = data.get("@odata.nextLink")
+
+    return items
+
+
+def _write_onedrive_folder_to_zip(access_token, folder_id, zip_file, relative_path="", stop_event=None):
+    for item in _list_folder_children(access_token, folder_id, stop_event=stop_event):
+        ensure_not_cancelled(stop_event)
+        item_name = item.get("name", "sin_nombre")
+        item_path = f"{relative_path}/{item_name}" if relative_path else item_name
+
+        if "folder" in item:
+            zip_file.writestr(f"{item_path}/", b"")
+            _write_onedrive_folder_to_zip(
+                access_token,
+                item["id"],
+                zip_file,
+                item_path,
+                stop_event=stop_event,
+            )
+            continue
+
+        download_url = item.get("@microsoft.graph.downloadUrl")
+        if not download_url:
+            continue
+        file_resp = requests.get(download_url, timeout=60)
+        if file_resp.status_code != 200:
+            raise RuntimeError(f"Error descargando archivo de OneDrive para ZIP: {file_resp.status_code}")
+        zip_file.writestr(item_path, file_resp.content)
 
 
 def get_access_token(user_email=None, log=print, stop_event=None, force_reauth=False):
@@ -277,6 +359,39 @@ def rename_onedrive_file(file_id, new_name, user_email=None):
     resp = requests.patch(url, headers=headers, json={"name": new_name.strip()}, timeout=30)
     if resp.status_code not in (200,):
         raise RuntimeError(f"Error renombrando en OneDrive: {resp.status_code} {resp.text}")
+
+
+def rename_onedrive_folder(folder_path, new_name, user_email=None):
+    if not folder_path:
+        raise ValueError("Se requiere la ruta de la carpeta en OneDrive.")
+    if not new_name or not new_name.strip():
+        raise ValueError("Se requiere un nombre nuevo para renombrar la carpeta en OneDrive.")
+
+    token = get_access_token(user_email)
+    folder = get_folder_item_by_path(token, folder_path)
+    url = f"https://graph.microsoft.com/v1.0/me/drive/items/{folder['id']}"
+    resp = requests.patch(url, headers=_graph_headers_json(token), json={"name": new_name.strip()}, timeout=30)
+    if resp.status_code not in (200,):
+        raise RuntimeError(f"Error renombrando carpeta en OneDrive: {resp.status_code} {resp.text}")
+
+
+def download_onedrive_folder_zip(folder_path, destination_zip, user_email=None, stop_event=None):
+    if not folder_path:
+        raise ValueError("Se requiere la ruta de la carpeta en OneDrive.")
+    if not destination_zip:
+        raise ValueError("Se requiere la ruta destino del ZIP.")
+
+    token = get_access_token(user_email, stop_event=stop_event)
+    folder = get_folder_item_by_path(token, folder_path)
+
+    with zipfile.ZipFile(destination_zip, "w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        _write_onedrive_folder_to_zip(
+            token,
+            folder["id"],
+            zip_file,
+            folder.get("name", "").strip() or "carpeta",
+            stop_event=stop_event,
+        )
 
 
 if __name__ == "__main__":

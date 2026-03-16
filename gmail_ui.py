@@ -9,7 +9,7 @@ import webbrowser
 from glob import glob
 from contextlib import redirect_stdout
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 from tkinter.scrolledtext import ScrolledText
 
 from gmail_stats import (
@@ -20,9 +20,21 @@ from gmail_stats import (
 )
 from outlook_stats import get_report_files as get_outlook_report_files
 from outlook_stats import process as process_outlook
-from drive_stats import list_drive, delete_drive_file, rename_drive_file
+from drive_stats import (
+    list_drive,
+    delete_drive_file,
+    rename_drive_file,
+    rename_drive_folder,
+    download_drive_folder_zip,
+)
 from drive_stats2 import process_extensions
-from onedrive_stats import list_onedrive, delete_onedrive_file, rename_onedrive_file
+from onedrive_stats import (
+    list_onedrive,
+    delete_onedrive_file,
+    rename_onedrive_file,
+    rename_onedrive_folder,
+    download_onedrive_folder_zip,
+)
 
 
 class GmailReportApp:
@@ -183,7 +195,8 @@ class GmailReportApp:
 
         drive_email_field = ttk.Frame(fields_row)
         drive_email_field.grid(row=0, column=1, sticky="ew", padx=(0, 12))
-        ttk.Label(drive_email_field, text="Correo Drive:").pack(anchor="w")
+        self.drive_email_label = ttk.Label(drive_email_field, text="Correo Google Drive:")
+        self.drive_email_label.pack(anchor="w")
         self.drive_email_var = tk.StringVar()
         self.drive_email_combo_var = tk.StringVar()
         self.drive_email_entry = ttk.Entry(drive_email_field, textvariable=self.drive_email_var)
@@ -191,7 +204,8 @@ class GmailReportApp:
 
         drive_saved_email_field = ttk.Frame(fields_row)
         drive_saved_email_field.grid(row=0, column=2, sticky="ew")
-        ttk.Label(drive_saved_email_field, text="Correo guardado:").pack(anchor="w")
+        self.drive_saved_email_label = ttk.Label(drive_saved_email_field, text="Correo guardado Google Drive:")
+        self.drive_saved_email_label.pack(anchor="w")
         self.drive_saved_email_frame = ttk.Frame(drive_saved_email_field)
         self.drive_saved_email_frame.pack(fill="x")
         self.drive_email_combo = ttk.Combobox(
@@ -203,7 +217,7 @@ class GmailReportApp:
         self.drive_email_combo_visible = False
         self.refresh_drive_email_selector()
 
-        self.drive_run_button = ttk.Button(actions_row, text="Procesar Drive", command=self.start_drive_report)
+        self.drive_run_button = ttk.Button(actions_row, text="Procesar Google Drive", command=self.start_drive_report)
         self.drive_run_button.pack(side="left")
         self.drive_load_button = ttk.Button(
             actions_row,
@@ -214,13 +228,16 @@ class GmailReportApp:
         self.drive_stop_button = ttk.Button(actions_row, text="Detener", command=self.stop_drive_report, state="disabled")
         self.drive_stop_button.pack(side="left", padx=(8, 0))
 
-        ttk.Label(parent, text="Estado Drive:").pack(anchor="w")
+        self.drive_status_label = ttk.Label(parent, text="Estado Google Drive:")
+        self.drive_status_label.pack(anchor="w")
         self.drive_log_box = ScrolledText(parent, height=8, wrap="word", state="disabled")
         self.drive_log_box.pack(fill="x", pady=(2, 6))
 
-        ttk.Label(parent, text="Archivos Drive generados:").pack(anchor="w")
+        self.drive_files_label = ttk.Label(parent, text="Archivos Google Drive generados:")
+        self.drive_files_label.pack(anchor="w")
         self.drive_notebook = ttk.Notebook(parent)
         self.drive_notebook.pack(fill="both", expand=True)
+        self.update_drive_provider_labels()
 
     def append_log(self, message):
         self.append_text_with_links(self.log_box, message)
@@ -264,7 +281,9 @@ class GmailReportApp:
 
     def on_provider_change(self, _event=None):
         provider = self.mail_provider_var.get()
+        self.email_var.set("")
         self.refresh_mail_email_selector()
+        self.reset_mail_panel_state()
         if provider == "Outlook":
             self.append_log("ℹ️ Proveedor seleccionado: Outlook")
         else:
@@ -276,13 +295,24 @@ class GmailReportApp:
             self.email_var.set(selected)
 
     def on_drive_provider_change(self, _event=None):
+        self.drive_email_var.set("")
         self.refresh_drive_email_selector()
+        self.reset_drive_panel_state()
+        self.update_drive_provider_labels()
         self.append_drive_log(f"ℹ️ Proveedor Drive seleccionado: {self.drive_provider_var.get()}")
 
     def on_drive_email_selected(self, _event=None):
         selected = self.drive_email_combo_var.get().strip()
         if selected:
             self.drive_email_var.set(selected)
+
+    def update_drive_provider_labels(self):
+        provider = self.drive_provider_var.get()
+        self.drive_email_label.configure(text=f"Correo {provider}:")
+        self.drive_saved_email_label.configure(text=f"Correo guardado {provider}:")
+        self.drive_run_button.configure(text=f"Procesar {provider}")
+        self.drive_status_label.configure(text=f"Estado {provider}:")
+        self.drive_files_label.configure(text=f"Archivos {provider} generados:")
 
     @staticmethod
     def _guess_email_from_safe_key(safe_key):
@@ -395,6 +425,8 @@ class GmailReportApp:
             self.mail_email_combo_visible = True
             if current in previous:
                 self.mail_email_combo_var.set(current)
+            elif not current:
+                self.mail_email_combo_var.set("")
             else:
                 self.mail_email_combo_var.set(previous[0])
         else:
@@ -414,6 +446,8 @@ class GmailReportApp:
             self.drive_email_combo_visible = True
             if current in previous:
                 self.drive_email_combo_var.set(current)
+            elif not current:
+                self.drive_email_combo_var.set("")
             else:
                 self.drive_email_combo_var.set(previous[0])
         else:
@@ -642,6 +676,18 @@ class GmailReportApp:
         return f"{parent}/{new_name}"
 
     @staticmethod
+    def replace_folder_name_in_path(folder_path, new_name):
+        if not folder_path:
+            return f"/{new_name}"
+        clean_path = folder_path.rstrip("/")
+        if "/" not in clean_path.strip("/"):
+            return f"/{new_name}"
+        parent = clean_path.rsplit("/", 1)[0]
+        if not parent:
+            return f"/{new_name}"
+        return f"{parent}/{new_name}"
+
+    @staticmethod
     def infer_numeric_column(tree, column, original_rows_map):
         for item_id in tree.get_children():
             raw = original_rows_map.get(item_id, {}).get(column, "")
@@ -780,6 +826,7 @@ class GmailReportApp:
 
         original_rows_map = {}
         browser_rows_map = {}
+        browser_folder_map = {}
         all_row_data = []
         for idx, row in enumerate(display_rows):
             all_row_data.append(
@@ -837,6 +884,7 @@ class GmailReportApp:
                 selected_file_id = (browser_rows_map.get(selected[0], {}) or {}).get("file_id")
 
             browser_rows_map.clear()
+            browser_folder_map.clear()
             for item_id in browser_tree.get_children():
                 browser_tree.delete(item_id)
 
@@ -859,6 +907,7 @@ class GmailReportApp:
                 for folder_name in folder_parts:
                     folder_key = f"{folder_key}/{folder_name}" if folder_key else folder_name
                     if folder_key not in folder_nodes:
+                        folder_path = f"/{folder_key}"
                         folder_nodes[folder_key] = browser_tree.insert(
                             parent_id,
                             "end",
@@ -867,6 +916,11 @@ class GmailReportApp:
                             open=False,
                             tags=("folder",),
                         )
+                        browser_folder_map[folder_nodes[folder_key]] = {
+                            "kind": "folder",
+                            "folder_name": folder_name,
+                            "folder_path": folder_path,
+                        }
                     parent_id = folder_nodes[folder_key]
 
                 item_id = browser_tree.insert(
@@ -907,6 +961,17 @@ class GmailReportApp:
                 return original_rows_map.get(selected[0], {})
             return browser_rows_map.get(selected[0], {})
 
+        def get_selected_browser_node():
+            selected = browser_tree.selection()
+            if not selected:
+                return None
+            item_id = selected[0]
+            if item_id in browser_rows_map:
+                return {"kind": "file", "data": browser_rows_map[item_id], "item_id": item_id}
+            if item_id in browser_folder_map:
+                return {"kind": "folder", "data": browser_folder_map[item_id], "item_id": item_id}
+            return None
+
         def update_row_info_after_rename(row_info, new_name):
             row_info["original_values"]["full_path"] = self.replace_file_name_in_path(
                 row_info["original_values"].get("full_path", ""),
@@ -917,7 +982,11 @@ class GmailReportApp:
             row_info["search_blob"] = " ".join(value.lower() for value in row_info["display_values"] if value)
 
         def on_select(_event=None):
+            selected_browser = get_selected_browser_node() if current_view["mode"] == "browser" else None
             row_data = get_selected_row_data()
+            if selected_browser and selected_browser["kind"] == "folder":
+                clear_link_labels()
+                return
             if not row_data:
                 clear_link_labels()
                 return
@@ -1044,6 +1113,96 @@ class GmailReportApp:
                 return
             self.show_file_details(row_data, columns)
 
+        def show_folder_details(folder_data):
+            if not folder_data:
+                return
+            lines = [
+                f"Tipo: Carpeta",
+                f"Nombre: {folder_data.get('folder_name', '') or '(vacío)'}",
+                f"Ruta: {folder_data.get('folder_path', '') or '(vacío)'}",
+            ]
+            messagebox.showinfo("Detalles de la carpeta", "\n".join(lines), parent=self.root)
+
+        def rename_selected_folder():
+            selected = get_selected_browser_node()
+            if not selected or selected["kind"] != "folder":
+                return
+
+            folder_data = selected["data"]
+            current_name = folder_data.get("folder_name", "")
+            new_name = simpledialog.askstring(
+                "Renombrar carpeta",
+                "Nuevo nombre de la carpeta:",
+                initialvalue=current_name,
+                parent=self.root,
+            )
+            if new_name is None:
+                return
+
+            new_name = new_name.strip()
+            if not new_name:
+                messagebox.showwarning("Renombrar carpeta", "El nombre nuevo no puede estar vacío.")
+                return
+            if new_name == current_name:
+                return
+
+            folder_path = folder_data.get("folder_path", "")
+            try:
+                provider = self.drive_provider_var.get()
+                drive_email = self.drive_email_var.get().strip() or None
+                if provider == "OneDrive":
+                    rename_onedrive_folder(folder_path, new_name, drive_email)
+                else:
+                    rename_drive_folder(folder_path, new_name, drive_email)
+
+                old_prefix = f"{folder_path.rstrip('/')}/"
+                new_folder_path = self.replace_folder_name_in_path(folder_path, new_name)
+                new_prefix = f"{new_folder_path.rstrip('/')}/"
+
+                for row_info in all_row_data:
+                    current_path = row_info["original_values"].get("full_path", "")
+                    if current_path.startswith(old_prefix):
+                        row_info["original_values"]["full_path"] = f"{new_prefix}{current_path[len(old_prefix):]}"
+                        row_info["display_values"] = self.build_display_row(columns, row_info["original_values"])
+                        row_info["search_blob"] = " ".join(
+                            value.lower() for value in row_info["display_values"] if value
+                        )
+
+                persist_rows()
+                apply_filter()
+                self.append_drive_log(f"📁 Carpeta renombrada: {current_name} -> {new_name}")
+            except Exception as exc:
+                messagebox.showerror("Renombrar carpeta", str(exc))
+
+        def download_selected_folder_zip():
+            selected = get_selected_browser_node()
+            if not selected or selected["kind"] != "folder":
+                return
+
+            folder_data = selected["data"]
+            folder_path = folder_data.get("folder_path", "")
+            folder_name = folder_data.get("folder_name", "carpeta").strip() or "carpeta"
+            zip_path = filedialog.asksaveasfilename(
+                parent=self.root,
+                title="Guardar ZIP de carpeta",
+                defaultextension=".zip",
+                initialfile=f"{folder_name}.zip",
+                filetypes=[("Archivo ZIP", "*.zip")],
+            )
+            if not zip_path:
+                return
+
+            try:
+                provider = self.drive_provider_var.get()
+                drive_email = self.drive_email_var.get().strip() or None
+                if provider == "OneDrive":
+                    download_onedrive_folder_zip(folder_path, zip_path, drive_email)
+                else:
+                    download_drive_folder_zip(folder_path, zip_path, drive_email)
+                self.append_drive_log(f"🗜 ZIP generado: {zip_path}")
+            except Exception as exc:
+                messagebox.showerror("Descargar ZIP de carpeta", str(exc))
+
         def fit_browser_columns(_event=None):
             total_width = max(browser_tree.winfo_width(), browser_frame.winfo_width()) - 24
             if total_width <= 0:
@@ -1073,6 +1232,11 @@ class GmailReportApp:
         context_menu.add_separator()
         context_menu.add_command(label="Eliminar", command=delete_selected_file)
 
+        folder_context_menu = tk.Menu(browser_tree, tearoff=0)
+        folder_context_menu.add_command(label="Detalles", command=lambda: show_folder_details(get_selected_browser_node()["data"]))
+        folder_context_menu.add_command(label="Renombrar carpeta", command=rename_selected_folder)
+        folder_context_menu.add_command(label="Descargar ZIP", command=download_selected_folder_zip)
+
         def show_context_menu(widget, event):
             item_id = widget.identify_row(event.y)
             if not item_id:
@@ -1080,10 +1244,17 @@ class GmailReportApp:
             widget.selection_set(item_id)
             widget.focus(item_id)
             on_select()
-            if not get_selected_row_data():
-                return
-            context_menu.tk_popup(event.x_root, event.y_root)
-            context_menu.grab_release()
+            if widget is browser_tree:
+                selected_browser = get_selected_browser_node()
+                if not selected_browser:
+                    return
+                menu = folder_context_menu if selected_browser["kind"] == "folder" else context_menu
+            else:
+                if not get_selected_row_data():
+                    return
+                menu = context_menu
+            menu.tk_popup(event.x_root, event.y_root)
+            menu.grab_release()
 
         toggle_view_button.configure(command=toggle_view)
         tree.bind("<<TreeviewSelect>>", on_select)
@@ -1233,11 +1404,11 @@ class GmailReportApp:
         drive_email = self.drive_email_var.get().strip()
         provider = self.drive_provider_var.get()
         if not drive_email:
-            messagebox.showwarning(self.REQUIRED_EMAIL_TITLE, "Ingresa el correo para Drive.")
+            messagebox.showwarning(self.REQUIRED_EMAIL_TITLE, f"Ingresa el correo {provider}.")
             return
 
         reauth_choice = messagebox.askyesnocancel(
-            "Procesar Drive",
+            f"Procesar {provider}",
             (
                 f"Se consultará nuevamente el servidor para {drive_email}.\n\n"
                 "Sí: volver a generar token y pedir credenciales de nuevo.\n"
@@ -1289,18 +1460,19 @@ class GmailReportApp:
 
     def load_existing_drive_report(self):
         drive_email = self.drive_email_var.get().strip()
+        provider = self.drive_provider_var.get()
         if not drive_email:
-            messagebox.showwarning(self.REQUIRED_EMAIL_TITLE, "Ingresa el correo para Drive.")
+            messagebox.showwarning(self.REQUIRED_EMAIL_TITLE, f"Ingresa el correo {provider}.")
             return
 
         files = self.get_drive_output_files(drive_email)
         existing = [path for path in files if os.path.exists(path)]
         if not existing:
-            self.append_drive_log(f"⚠️ No hay reportes de Drive previos para {drive_email}.")
+            self.append_drive_log(f"⚠️ No hay reportes previos de {provider} para {drive_email}.")
             return
 
         self.render_drive_tabs(files)
-        self.append_drive_log(f"ℹ️ Se cargaron los últimos archivos de {self.drive_provider_var.get()} sin reescanear.")
+        self.append_drive_log(f"ℹ️ Se cargaron los últimos archivos de {provider} sin reescanear.")
 
     def load_existing_mail_report(self):
         email = self.email_var.get().strip()
